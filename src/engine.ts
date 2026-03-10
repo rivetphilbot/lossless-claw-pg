@@ -17,7 +17,7 @@ import type {
 import { ContextAssembler } from "./assembler.js";
 import { CompactionEngine, type CompactionConfig } from "./compaction.js";
 import type { LcmConfig } from "./db/config.js";
-import { getLcmConnection, closeLcmConnection } from "./db/connection.js";
+import { createLcmConnection, closeLcmConnection } from "./db/connection.js";
 import { getLcmDbFeatures } from "./db/features.js";
 import { runLcmMigrations } from "./db/migration.js";
 import {
@@ -579,11 +579,18 @@ export class LcmContextEngine implements ContextEngine {
     this.deps = deps;
     this.config = deps.config;
 
-    const db = getLcmConnection(this.config.databasePath);
-    this.fts5Available = getLcmDbFeatures(db).fts5Available;
+    const db = createLcmConnection(this.config);
+    const features = getLcmDbFeatures(this.config);
+    this.fts5Available = features.fts5Available;
 
-    this.conversationStore = new ConversationStore(db, { fts5Available: this.fts5Available });
-    this.summaryStore = new SummaryStore(db, { fts5Available: this.fts5Available });
+    this.conversationStore = new ConversationStore(db, { 
+      fts5Available: this.fts5Available,
+      backend: features.backend
+    });
+    this.summaryStore = new SummaryStore(db, { 
+      fts5Available: this.fts5Available,
+      backend: features.backend
+    });
 
     if (!this.fts5Available) {
       this.deps.log.warn(
@@ -624,8 +631,18 @@ export class LcmContextEngine implements ContextEngine {
     if (this.migrated) {
       return;
     }
-    const db = getLcmConnection(this.config.databasePath);
-    runLcmMigrations(db, { fts5Available: this.fts5Available });
+    if (this.config.backend === 'postgres') {
+      // PostgreSQL schema is already deployed, skip migrations
+      this.migrated = true;
+      return;
+    }
+    
+    // For SQLite, run migrations as before
+    const db = createLcmConnection(this.config);
+    if ('getUnderlyingDatabase' in db) {
+      const sqliteDb = (db as any).getUnderlyingDatabase();
+      runLcmMigrations(sqliteDb, { fts5Available: this.fts5Available });
+    }
     this.migrated = true;
   }
 

@@ -71,10 +71,14 @@ export function resolveLcmConfig(
     env.LCM_CONNECTION_STRING
     ?? toStr(pc.connectionString);
 
-  const backend = 
+  let backend = 
     env.LCM_BACKEND
     ?? toStr(pc.backend)
-    ?? (connectionString ? 'postgres' : 'sqlite') as 'sqlite' | 'postgres';
+    ?? (connectionString ? 'postgres' : 'sqlite');
+  
+  if (backend !== 'sqlite' && backend !== 'postgres') {
+    backend = connectionString ? 'postgres' : 'sqlite';
+  }
 
   return {
     enabled:
@@ -87,7 +91,7 @@ export function resolveLcmConfig(
       ?? toStr(pc.databasePath)
       ?? join(homedir(), ".openclaw", "lcm.db"),
     connectionString,
-    backend,
+    backend: backend as 'sqlite' | 'postgres',
     contextThreshold:
       (env.LCM_CONTEXT_THRESHOLD !== undefined ? parseFloat(env.LCM_CONTEXT_THRESHOLD) : undefined)
         ?? toNumber(pc.contextThreshold) ?? 0.75,

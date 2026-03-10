@@ -1,5 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
+import type { DbClient } from "../db/db-interface.js";
 import { sanitizeFts5Query } from "./fts5-sanitize.js";
+import { sanitizeTsQuery } from "./tsquery-sanitize.js";
 import { buildLikeSearchPlan, createFallbackSnippet } from "./full-text-fallback.js";
 
 export type SummaryKind = "leaf" | "condensed";
@@ -241,12 +243,14 @@ function toLargeFileRecord(row: LargeFileRow): LargeFileRecord {
 
 export class SummaryStore {
   private readonly fts5Available: boolean;
+  private readonly backend: 'sqlite' | 'postgres';
 
   constructor(
-    private db: DatabaseSync,
-    options?: { fts5Available?: boolean },
+    private db: DbClient,
+    options?: { fts5Available?: boolean; backend?: 'sqlite' | 'postgres' },
   ) {
     this.fts5Available = options?.fts5Available ?? true;
+    this.backend = options?.backend ?? 'sqlite';
   }
 
   // ── Summary CRUD ──────────────────────────────────────────────────────────

@@ -8,22 +8,22 @@ export class SqliteClient implements DbClient {
   constructor(private db: DatabaseSync) {}
 
   async query<T>(sql: string, params: unknown[] = []): Promise<QueryResult<T>> {
-    const rows = this.db.prepare(sql).all(...params) as T[];
+    const rows = this.db.prepare(sql).all(...params.map(p => p as any)) as T[];
     return { rows };
   }
 
   async queryOne<T>(sql: string, params: unknown[] = []): Promise<T | null> {
-    const row = this.db.prepare(sql).get(...params) as T | undefined;
+    const row = this.db.prepare(sql).get(...params.map(p => p as any)) as T | undefined;
     return row ?? null;
   }
 
   async run(sql: string, params: unknown[] = []): Promise<RunResult> {
-    const result = this.db.prepare(sql).run(...params);
+    const result = this.db.prepare(sql).run(...params.map(p => p as any));
     return {
       rowCount: result.changes,
       lastInsertId: typeof result.lastInsertRowid === "bigint" 
         ? Number(result.lastInsertRowid) 
-        : result.lastInsertRowid as number
+        : (result.lastInsertRowid as number | undefined)
     };
   }
 

@@ -1,6 +1,8 @@
 import type { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
+import type { DbClient } from "../db/db-interface.js";
 import { sanitizeFts5Query } from "./fts5-sanitize.js";
+import { sanitizeTsQuery } from "./tsquery-sanitize.js";
 import { buildLikeSearchPlan, createFallbackSnippet } from "./full-text-fallback.js";
 
 export type ConversationId = number;
@@ -205,67 +207,82 @@ function toMessagePartRecord(row: MessagePartRow): MessagePartRecord {
 
 export class ConversationStore {
   private readonly fts5Available: boolean;
+  private readonly backend: 'sqlite' | 'postgres';
 
   constructor(
-    private db: DatabaseSync,
-    options?: { fts5Available?: boolean },
+    private db: DbClient,
+    options?: { fts5Available?: boolean; backend?: 'sqlite' | 'postgres' },
   ) {
     this.fts5Available = options?.fts5Available ?? true;
+    this.backend = options?.backend ?? 'sqlite';
   }
 
   // ── Transaction helpers ──────────────────────────────────────────────────
 
   async withTransaction<T>(operation: () => Promise<T> | T): Promise<T> {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const result = await operation();
-      this.db.exec("COMMIT");
-      return result;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    return this.db.transaction(async () => {
+      return await operation();
+    });
   }
 
   // ── Conversation operations ───────────────────────────────────────────────
 
   async createConversation(input: CreateConversationInput): Promise<ConversationRecord> {
-    const result = this.db
-      .prepare(`INSERT INTO conversations (session_id, title) VALUES (?, ?)`)
-      .run(input.sessionId, input.title ?? null);
+    let sql: string;
+    let params: unknown[];
 
-    const row = this.db
-      .prepare(
-        `SELECT conversation_id, session_id, title, bootstrapped_at, created_at, updated_at
-       FROM conversations WHERE conversation_id = ?`,
-      )
-      .get(Number(result.lastInsertRowid)) as unknown as ConversationRow;
+    if (this.backend === 'postgres') {
+      sql = `INSERT INTO conversations (session_id, title) VALUES ($1, $2) RETURNING conversation_id`;
+      params = [input.sessionId, input.title ?? null];
+    } else {
+      sql = `INSERT INTO conversations (session_id, title) VALUES (?, ?)`;
+      params = [input.sessionId, input.title ?? null];
+    }
+
+    const result = await this.db.run(sql, params);
+
+    // Get the inserted conversation
+    const selectSql = this.backend === 'postgres'
+      ? `SELECT conversation_id, session_id, title, bootstrapped_at, created_at, updated_at
+         FROM conversations WHERE conversation_id = $1`
+      : `SELECT conversation_id, session_id, title, bootstrapped_at, created_at, updated_at
+         FROM conversations WHERE conversation_id = ?`;
+
+    const conversationId = result.lastInsertId!;
+    const row = await this.db.queryOne<ConversationRow>(selectSql, [conversationId]);
+
+    if (!row) {
+      throw new Error(`Failed to retrieve created conversation with ID ${conversationId}`);
+    }
 
     return toConversationRecord(row);
   }
 
   async getConversation(conversationId: ConversationId): Promise<ConversationRecord | null> {
-    const row = this.db
-      .prepare(
-        `SELECT conversation_id, session_id, title, bootstrapped_at, created_at, updated_at
-       FROM conversations WHERE conversation_id = ?`,
-      )
-      .get(conversationId) as unknown as ConversationRow | undefined;
+    const sql = this.backend === 'postgres'
+      ? `SELECT conversation_id, session_id, title, bootstrapped_at, created_at, updated_at
+         FROM conversations WHERE conversation_id = $1`
+      : `SELECT conversation_id, session_id, title, bootstrapped_at, created_at, updated_at
+         FROM conversations WHERE conversation_id = ?`;
 
+    const row = await this.db.queryOne<ConversationRow>(sql, [conversationId]);
     return row ? toConversationRecord(row) : null;
   }
 
   async getConversationBySessionId(sessionId: string): Promise<ConversationRecord | null> {
-    const row = this.db
-      .prepare(
-        `SELECT conversation_id, session_id, title, bootstrapped_at, created_at, updated_at
-       FROM conversations
-       WHERE session_id = ?
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      )
-      .get(sessionId) as unknown as ConversationRow | undefined;
+    const sql = this.backend === 'postgres'
+      ? `SELECT conversation_id, session_id, title, bootstrapped_at, created_at, updated_at
+         FROM conversations
+         WHERE session_id = $1
+         ORDER BY created_at DESC
+         LIMIT 1`
+      : `SELECT conversation_id, session_id, title, bootstrapped_at, created_at, updated_at
+         FROM conversations
+         WHERE session_id = ?
+         ORDER BY created_at DESC
+         LIMIT 1`;
 
+    const row = await this.db.queryOne<ConversationRow>(sql, [sessionId]);
     return row ? toConversationRecord(row) : null;
   }
 
@@ -278,36 +295,55 @@ export class ConversationStore {
   }
 
   async markConversationBootstrapped(conversationId: ConversationId): Promise<void> {
-    this.db
-      .prepare(
-        `UPDATE conversations
-       SET bootstrapped_at = COALESCE(bootstrapped_at, datetime('now')),
-           updated_at = datetime('now')
-       WHERE conversation_id = ?`,
-      )
-      .run(conversationId);
+    let sql: string;
+    
+    if (this.backend === 'postgres') {
+      sql = `UPDATE conversations
+             SET bootstrapped_at = COALESCE(bootstrapped_at, NOW()),
+                 updated_at = NOW()
+             WHERE conversation_id = $1`;
+    } else {
+      sql = `UPDATE conversations
+             SET bootstrapped_at = COALESCE(bootstrapped_at, datetime('now')),
+                 updated_at = datetime('now')
+             WHERE conversation_id = ?`;
+    }
+
+    await this.db.run(sql, [conversationId]);
   }
 
   // ── Message operations ────────────────────────────────────────────────────
 
   async createMessage(input: CreateMessageInput): Promise<MessageRecord> {
-    const result = this.db
-      .prepare(
-        `INSERT INTO messages (conversation_id, seq, role, content, token_count)
-       VALUES (?, ?, ?, ?, ?)`,
-      )
-      .run(input.conversationId, input.seq, input.role, input.content, input.tokenCount);
+    let sql: string;
+    let params: unknown[];
 
-    const messageId = Number(result.lastInsertRowid);
+    if (this.backend === 'postgres') {
+      sql = `INSERT INTO messages (conversation_id, seq, role, content, token_count)
+             VALUES ($1, $2, $3, $4, $5) RETURNING message_id`;
+      params = [input.conversationId, input.seq, input.role, input.content, input.tokenCount];
+    } else {
+      sql = `INSERT INTO messages (conversation_id, seq, role, content, token_count)
+             VALUES (?, ?, ?, ?, ?)`;
+      params = [input.conversationId, input.seq, input.role, input.content, input.tokenCount];
+    }
 
-    this.indexMessageForFullText(messageId, input.content);
+    const result = await this.db.run(sql, params);
+    const messageId = result.lastInsertId!;
 
-    const row = this.db
-      .prepare(
-        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
-       FROM messages WHERE message_id = ?`,
-      )
-      .get(messageId) as unknown as MessageRow;
+    await this.indexMessageForFullText(messageId, input.content);
+
+    const selectSql = this.backend === 'postgres'
+      ? `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+         FROM messages WHERE message_id = $1`
+      : `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+         FROM messages WHERE message_id = ?`;
+
+    const row = await this.db.queryOne<MessageRow>(selectSql, [messageId]);
+
+    if (!row) {
+      throw new Error(`Failed to retrieve created message with ID ${messageId}`);
+    }
 
     return toMessageRecord(row);
   }
@@ -316,29 +352,37 @@ export class ConversationStore {
     if (inputs.length === 0) {
       return [];
     }
-    const insertStmt = this.db.prepare(
-      `INSERT INTO messages (conversation_id, seq, role, content, token_count)
-       VALUES (?, ?, ?, ?, ?)`,
-    );
-    const selectStmt = this.db.prepare(
-      `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
-       FROM messages WHERE message_id = ?`,
-    );
 
     const records: MessageRecord[] = [];
     for (const input of inputs) {
-      const result = insertStmt.run(
-        input.conversationId,
-        input.seq,
-        input.role,
-        input.content,
-        input.tokenCount,
-      );
+      let insertSql: string;
+      let insertParams: unknown[];
 
-      const messageId = Number(result.lastInsertRowid);
-      this.indexMessageForFullText(messageId, input.content);
-      const row = selectStmt.get(messageId) as unknown as MessageRow;
-      records.push(toMessageRecord(row));
+      if (this.backend === 'postgres') {
+        insertSql = `INSERT INTO messages (conversation_id, seq, role, content, token_count)
+                     VALUES ($1, $2, $3, $4, $5) RETURNING message_id`;
+        insertParams = [input.conversationId, input.seq, input.role, input.content, input.tokenCount];
+      } else {
+        insertSql = `INSERT INTO messages (conversation_id, seq, role, content, token_count)
+                     VALUES (?, ?, ?, ?, ?)`;
+        insertParams = [input.conversationId, input.seq, input.role, input.content, input.tokenCount];
+      }
+
+      const result = await this.db.run(insertSql, insertParams);
+      const messageId = result.lastInsertId!;
+
+      await this.indexMessageForFullText(messageId, input.content);
+
+      const selectSql = this.backend === 'postgres'
+        ? `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+           FROM messages WHERE message_id = $1`
+        : `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+           FROM messages WHERE message_id = ?`;
+
+      const row = await this.db.queryOne<MessageRow>(selectSql, [messageId]);
+      if (row) {
+        records.push(toMessageRecord(row));
+      }
     }
 
     return records;
@@ -351,28 +395,43 @@ export class ConversationStore {
     const afterSeq = opts?.afterSeq ?? -1;
     const limit = opts?.limit;
 
+    let sql: string;
+    let params: unknown[];
+
     if (limit != null) {
-      const rows = this.db
-        .prepare(
-          `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
-         FROM messages
-         WHERE conversation_id = ? AND seq > ?
-         ORDER BY seq
-         LIMIT ?`,
-        )
-        .all(conversationId, afterSeq, limit) as unknown as MessageRow[];
-      return rows.map(toMessageRecord);
+      if (this.backend === 'postgres') {
+        sql = `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+               FROM messages
+               WHERE conversation_id = $1 AND seq > $2
+               ORDER BY seq
+               LIMIT $3`;
+        params = [conversationId, afterSeq, limit];
+      } else {
+        sql = `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+               FROM messages
+               WHERE conversation_id = ? AND seq > ?
+               ORDER BY seq
+               LIMIT ?`;
+        params = [conversationId, afterSeq, limit];
+      }
+    } else {
+      if (this.backend === 'postgres') {
+        sql = `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+               FROM messages
+               WHERE conversation_id = $1 AND seq > $2
+               ORDER BY seq`;
+        params = [conversationId, afterSeq];
+      } else {
+        sql = `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+               FROM messages
+               WHERE conversation_id = ? AND seq > ?
+               ORDER BY seq`;
+        params = [conversationId, afterSeq];
+      }
     }
 
-    const rows = this.db
-      .prepare(
-        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
-       FROM messages
-       WHERE conversation_id = ? AND seq > ?
-       ORDER BY seq`,
-      )
-      .all(conversationId, afterSeq) as unknown as MessageRow[];
-    return rows.map(toMessageRecord);
+    const result = await this.db.query<MessageRow>(sql, params);
+    return result.rows.map(toMessageRecord);
   }
 
   async getLastMessage(conversationId: ConversationId): Promise<MessageRecord | null> {
@@ -558,7 +617,7 @@ export class ConversationStore {
     if (input.mode === "full_text") {
       if (this.fts5Available) {
         try {
-          return this.searchFullText(
+          return await this.searchFullText(
             input.query,
             limit,
             input.conversationId,
@@ -566,7 +625,7 @@ export class ConversationStore {
             input.before,
           );
         } catch {
-          return this.searchLike(
+          return await this.searchLike(
             input.query,
             limit,
             input.conversationId,
@@ -575,44 +634,69 @@ export class ConversationStore {
           );
         }
       }
-      return this.searchLike(input.query, limit, input.conversationId, input.since, input.before);
+      return await this.searchLike(input.query, limit, input.conversationId, input.since, input.before);
     }
-    return this.searchRegex(input.query, limit, input.conversationId, input.since, input.before);
+    return await this.searchRegex(input.query, limit, input.conversationId, input.since, input.before);
   }
 
-  private indexMessageForFullText(messageId: MessageId, content: string): void {
+  private async indexMessageForFullText(messageId: MessageId, content: string): Promise<void> {
     if (!this.fts5Available) {
       return;
     }
     try {
-      this.db
-        .prepare(`INSERT INTO messages_fts(rowid, content) VALUES (?, ?)`)
-        .run(messageId, content);
+      if (this.backend === 'postgres') {
+        // PostgreSQL uses tsvector columns that are automatically updated via triggers
+        // No explicit indexing needed - the database handles this automatically
+        return;
+      } else {
+        await this.db.run(`INSERT INTO messages_fts(rowid, content) VALUES (?, ?)`, [messageId, content]);
+      }
     } catch {
       // Full-text indexing is optional. Message persistence must still succeed.
     }
   }
 
-  private deleteMessageFromFullText(messageId: MessageId): void {
+  private async deleteMessageFromFullText(messageId: MessageId): Promise<void> {
     if (!this.fts5Available) {
       return;
     }
     try {
-      this.db.prepare(`DELETE FROM messages_fts WHERE rowid = ?`).run(messageId);
+      if (this.backend === 'postgres') {
+        // PostgreSQL tsvector columns are automatically updated via triggers
+        // No explicit deletion needed
+        return;
+      } else {
+        await this.db.run(`DELETE FROM messages_fts WHERE rowid = ?`, [messageId]);
+      }
     } catch {
       // Ignore FTS cleanup failures; the source row deletion is authoritative.
     }
   }
 
-  private searchFullText(
+  private async searchFullText(
     query: string,
     limit: number,
     conversationId?: ConversationId,
     since?: Date,
     before?: Date,
-  ): MessageSearchResult[] {
+  ): Promise<MessageSearchResult[]> {
+    if (this.backend === 'postgres') {
+      return this.searchFullTextPostgres(query, limit, conversationId, since, before);
+    } else {
+      return this.searchFullTextSqlite(query, limit, conversationId, since, before);
+    }
+  }
+
+  private async searchFullTextSqlite(
+    query: string,
+    limit: number,
+    conversationId?: ConversationId,
+    since?: Date,
+    before?: Date,
+  ): Promise<MessageSearchResult[]> {
     const where: string[] = ["messages_fts MATCH ?"];
     const args: Array<string | number> = [sanitizeFts5Query(query)];
+    
     if (conversationId != null) {
       where.push("m.conversation_id = ?");
       args.push(conversationId);
@@ -639,50 +723,126 @@ export class ConversationStore {
        WHERE ${where.join(" AND ")}
        ORDER BY m.created_at DESC
        LIMIT ?`;
-    const rows = this.db.prepare(sql).all(...args) as unknown as MessageSearchRow[];
-    return rows.map(toSearchResult);
+    
+    const result = await this.db.query<MessageSearchRow>(sql, args);
+    return result.rows.map(toSearchResult);
   }
 
-  private searchLike(
+  private async searchFullTextPostgres(
     query: string,
     limit: number,
     conversationId?: ConversationId,
     since?: Date,
     before?: Date,
-  ): MessageSearchResult[] {
+  ): Promise<MessageSearchResult[]> {
+    const where: string[] = ["content_tsvector @@ plainto_tsquery('english', $1)"];
+    const args: Array<string | number> = [sanitizeTsQuery(query)];
+    let paramIndex = 2;
+
+    if (conversationId != null) {
+      where.push(`conversation_id = $${paramIndex}`);
+      args.push(conversationId);
+      paramIndex++;
+    }
+    if (since) {
+      where.push(`created_at >= $${paramIndex}`);
+      args.push(since.toISOString());
+      paramIndex++;
+    }
+    if (before) {
+      where.push(`created_at < $${paramIndex}`);
+      args.push(before.toISOString());
+      paramIndex++;
+    }
+
+    const sql = `SELECT
+         message_id,
+         conversation_id,
+         role,
+         ts_headline('english', content, plainto_tsquery('english', $1), 'MaxWords=32') AS snippet,
+         ts_rank(content_tsvector, plainto_tsquery('english', $1)) AS rank,
+         created_at
+       FROM messages
+       WHERE ${where.join(" AND ")}
+       ORDER BY created_at DESC
+       LIMIT $${paramIndex}`;
+    
+    args.push(limit);
+    const result = await this.db.query<MessageSearchRow>(sql, args);
+    return result.rows.map(toSearchResult);
+  }
+
+  private async searchLike(
+    query: string,
+    limit: number,
+    conversationId?: ConversationId,
+    since?: Date,
+    before?: Date,
+  ): Promise<MessageSearchResult[]> {
     const plan = buildLikeSearchPlan("content", query);
     if (plan.terms.length === 0) {
       return [];
     }
 
-    const where: string[] = [...plan.where];
-    const args: Array<string | number> = [...plan.args];
-    if (conversationId != null) {
-      where.push("conversation_id = ?");
-      args.push(conversationId);
+    let where: string[] = [...plan.where];
+    let args: Array<string | number> = [...plan.args];
+    let paramIndex = args.length + 1;
+
+    if (this.backend === 'postgres') {
+      // Convert ? placeholders to $n for PostgreSQL
+      where = plan.where.map((clause, index) => {
+        let converted = clause;
+        for (let i = 0; i < args.length; i++) {
+          converted = converted.replace('?', `$${i + 1}`);
+        }
+        return converted;
+      });
+
+      if (conversationId != null) {
+        where.push(`conversation_id = $${paramIndex}`);
+        args.push(conversationId);
+        paramIndex++;
+      }
+      if (since) {
+        where.push(`created_at >= $${paramIndex}`);
+        args.push(since.toISOString());
+        paramIndex++;
+      }
+      if (before) {
+        where.push(`created_at < $${paramIndex}`);
+        args.push(before.toISOString());
+        paramIndex++;
+      }
+      args.push(limit);
+    } else {
+      // SQLite
+      if (conversationId != null) {
+        where.push("conversation_id = ?");
+        args.push(conversationId);
+      }
+      if (since) {
+        where.push("julianday(created_at) >= julianday(?)");
+        args.push(since.toISOString());
+      }
+      if (before) {
+        where.push("julianday(created_at) < julianday(?)");
+        args.push(before.toISOString());
+      }
+      args.push(limit);
     }
-    if (since) {
-      where.push("julianday(created_at) >= julianday(?)");
-      args.push(since.toISOString());
-    }
-    if (before) {
-      where.push("julianday(created_at) < julianday(?)");
-      args.push(before.toISOString());
-    }
-    args.push(limit);
 
     const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
-    const rows = this.db
-      .prepare(
-        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
-         FROM messages
-         ${whereClause}
-         ORDER BY created_at DESC
-         LIMIT ?`,
-      )
-      .all(...args) as unknown as MessageRow[];
+    const limitClause = this.backend === 'postgres' ? `LIMIT $${args.length}` : 'LIMIT ?';
+    
+    const sql = `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+                 FROM messages
+                 ${whereClause}
+                 ORDER BY created_at DESC
+                 ${limitClause}`;
 
-    return rows.map((row) => ({
+    const result = await this.db.query<MessageRow>(sql, args);
+
+    return result.rows.map((row) => ({
       messageId: row.message_id,
       conversationId: row.conversation_id,
       role: row.role,
@@ -692,13 +852,27 @@ export class ConversationStore {
     }));
   }
 
-  private searchRegex(
+  private async searchRegex(
     pattern: string,
     limit: number,
     conversationId?: ConversationId,
     since?: Date,
     before?: Date,
-  ): MessageSearchResult[] {
+  ): Promise<MessageSearchResult[]> {
+    if (this.backend === 'postgres') {
+      return this.searchRegexPostgres(pattern, limit, conversationId, since, before);
+    } else {
+      return this.searchRegexSqlite(pattern, limit, conversationId, since, before);
+    }
+  }
+
+  private async searchRegexSqlite(
+    pattern: string,
+    limit: number,
+    conversationId?: ConversationId,
+    since?: Date,
+    before?: Date,
+  ): Promise<MessageSearchResult[]> {
     // SQLite has no native POSIX regex; fetch candidates and filter in JS
     const re = new RegExp(pattern);
 
@@ -717,17 +891,16 @@ export class ConversationStore {
       args.push(before.toISOString());
     }
     const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
-    const rows = this.db
-      .prepare(
-        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
-         FROM messages
-         ${whereClause}
-         ORDER BY created_at DESC`,
-      )
-      .all(...args) as unknown as MessageRow[];
+    
+    const sql = `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+                 FROM messages
+                 ${whereClause}
+                 ORDER BY created_at DESC`;
+
+    const result = await this.db.query<MessageRow>(sql, args);
 
     const results: MessageSearchResult[] = [];
-    for (const row of rows) {
+    for (const row of result.rows) {
       if (results.length >= limit) {
         break;
       }
@@ -744,5 +917,58 @@ export class ConversationStore {
       }
     }
     return results;
+  }
+
+  private async searchRegexPostgres(
+    pattern: string,
+    limit: number,
+    conversationId?: ConversationId,
+    since?: Date,
+    before?: Date,
+  ): Promise<MessageSearchResult[]> {
+    // PostgreSQL has native POSIX regex support
+    const where: string[] = ["content ~ $1"];
+    const args: Array<string | number> = [pattern];
+    let paramIndex = 2;
+
+    if (conversationId != null) {
+      where.push(`conversation_id = $${paramIndex}`);
+      args.push(conversationId);
+      paramIndex++;
+    }
+    if (since) {
+      where.push(`created_at >= $${paramIndex}`);
+      args.push(since.toISOString());
+      paramIndex++;
+    }
+    if (before) {
+      where.push(`created_at < $${paramIndex}`);
+      args.push(before.toISOString());
+      paramIndex++;
+    }
+
+    const sql = `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+                 FROM messages
+                 WHERE ${where.join(" AND ")}
+                 ORDER BY created_at DESC
+                 LIMIT $${paramIndex}`;
+
+    args.push(limit);
+    const result = await this.db.query<MessageRow>(sql, args);
+
+    return result.rows.map((row) => {
+      // Extract the first regex match for snippet
+      const re = new RegExp(pattern);
+      const match = re.exec(row.content);
+      
+      return {
+        messageId: row.message_id,
+        conversationId: row.conversation_id,
+        role: row.role,
+        snippet: match ? match[0] : row.content.substring(0, 100),
+        createdAt: new Date(row.created_at),
+        rank: 0,
+      };
+    });
   }
 }

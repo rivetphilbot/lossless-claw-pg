@@ -1,7 +1,10 @@
 import type { DatabaseSync } from "node:sqlite";
+import type { DbClient } from "./db-interface.js";
+import type { LcmConfig } from "./config.js";
 
 export type LcmDbFeatures = {
   fts5Available: boolean;
+  backend: 'sqlite' | 'postgres';
 };
 
 const featureCache = new WeakMap<DatabaseSync, LcmDbFeatures>();
@@ -23,12 +26,47 @@ function probeFts5(db: DatabaseSync): boolean {
 }
 
 /**
- * Detect SQLite features exposed by the current Node runtime.
+ * Detect database features based on the backend type and configuration.
  *
- * The result is cached per DatabaseSync handle because the probe is runtime-
- * specific, not database-file-specific.
+ * For SQLite: probe for FTS5 availability (runtime-specific)
+ * For PostgreSQL: tsvector is always available (built-in)
  */
-export function getLcmDbFeatures(db: DatabaseSync): LcmDbFeatures {
+export function getLcmDbFeatures(config: LcmConfig, dbOrClient?: DatabaseSync | DbClient): LcmDbFeatures {
+  if (config.backend === 'postgres') {
+    // PostgreSQL has built-in full-text search with tsvector
+    return {
+      fts5Available: true, // We map FTS5 concept to tsvector availability
+      backend: 'postgres'
+    };
+  }
+
+  // SQLite backend - probe for FTS5 if we have a DatabaseSync handle
+  if (dbOrClient && 'prepare' in dbOrClient) {
+    const db = dbOrClient as DatabaseSync;
+    const cached = featureCache.get(db);
+    if (cached) {
+      return cached;
+    }
+
+    const detected: LcmDbFeatures = {
+      fts5Available: probeFts5(db),
+      backend: 'sqlite'
+    };
+    featureCache.set(db, detected);
+    return detected;
+  }
+
+  // Fallback for SQLite when no database handle available
+  return {
+    fts5Available: false,
+    backend: 'sqlite'
+  };
+}
+
+/**
+ * Legacy function for backward compatibility with existing SQLite code
+ */
+export function getLcmDbFeaturesLegacy(db: DatabaseSync): LcmDbFeatures {
   const cached = featureCache.get(db);
   if (cached) {
     return cached;
@@ -36,6 +74,7 @@ export function getLcmDbFeatures(db: DatabaseSync): LcmDbFeatures {
 
   const detected: LcmDbFeatures = {
     fts5Available: probeFts5(db),
+    backend: 'sqlite'
   };
   featureCache.set(db, detected);
   return detected;
