@@ -283,45 +283,64 @@ export class SummaryStore {
           ? 0
           : 1;
 
-    await this.db.run(
-      `INSERT INTO summaries (
-        summary_id,
-        conversation_id,
-        kind,
-        depth,
-        content,
-        token_count,
-        file_ids,
-        earliest_at,
-        latest_at,
-        descendant_count,
-        descendant_token_count,
-        source_message_token_count
-      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        input.summaryId,
-        input.conversationId,
-        input.kind,
-        depth,
-        input.content,
-        input.tokenCount,
-        fileIds,
-        earliestAt,
-        latestAt,
-        descendantCount,
-        descendantTokenCount,
-        sourceMessageTokenCount,
-      ],
-    );
+    const insertSql = this.backend === 'postgres'
+      ? `INSERT INTO summaries (
+          summary_id,
+          conversation_id,
+          kind,
+          depth,
+          content,
+          token_count,
+          file_ids,
+          earliest_at,
+          latest_at,
+          descendant_count,
+          descendant_token_count,
+          source_message_token_count
+        )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
+      : `INSERT INTO summaries (
+          summary_id,
+          conversation_id,
+          kind,
+          depth,
+          content,
+          token_count,
+          file_ids,
+          earliest_at,
+          latest_at,
+          descendant_count,
+          descendant_token_count,
+          source_message_token_count
+        )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
-    const row = await this.db.queryOne<SummaryRow>(
-      `SELECT summary_id, conversation_id, kind, depth, content, token_count, file_ids,
-              earliest_at, latest_at, descendant_count, created_at
-              , descendant_token_count, source_message_token_count
-     FROM summaries WHERE summary_id = ?`,
-      [input.summaryId],
-    );
+    await this.db.run(insertSql, [
+      input.summaryId,
+      input.conversationId,
+      input.kind,
+      depth,
+      input.content,
+      input.tokenCount,
+      fileIds,
+      earliestAt,
+      latestAt,
+      descendantCount,
+      descendantTokenCount,
+      sourceMessageTokenCount,
+    ]);
+
+    const selectSql = this.backend === 'postgres'
+      ? `SELECT summary_id, conversation_id, kind, depth, content, token_count, file_ids,
+                earliest_at, latest_at, descendant_count, created_at
+                , descendant_token_count, source_message_token_count
+       FROM summaries WHERE summary_id = $1`
+      : `SELECT summary_id, conversation_id, kind, depth, content, token_count, file_ids,
+                earliest_at, latest_at, descendant_count, created_at
+                , descendant_token_count, source_message_token_count
+       FROM summaries WHERE summary_id = ?`;
+
+    const row = await this.db.queryOne<SummaryRow>(selectSql, [input.summaryId]);
 
     if (!row) {
       throw new Error(`Failed to retrieve inserted summary ${input.summaryId}`);
@@ -347,26 +366,36 @@ export class SummaryStore {
   }
 
   async getSummary(summaryId: string): Promise<SummaryRecord | null> {
-    const row = await this.db.queryOne<SummaryRow>(
-      `SELECT summary_id, conversation_id, kind, depth, content, token_count, file_ids,
-              earliest_at, latest_at, descendant_count, created_at
-              , descendant_token_count, source_message_token_count
-     FROM summaries WHERE summary_id = ?`,
-      [summaryId],
-    );
+    const sql = this.backend === 'postgres'
+      ? `SELECT summary_id, conversation_id, kind, depth, content, token_count, file_ids,
+                earliest_at, latest_at, descendant_count, created_at
+                , descendant_token_count, source_message_token_count
+       FROM summaries WHERE summary_id = $1`
+      : `SELECT summary_id, conversation_id, kind, depth, content, token_count, file_ids,
+                earliest_at, latest_at, descendant_count, created_at
+                , descendant_token_count, source_message_token_count
+       FROM summaries WHERE summary_id = ?`;
+
+    const row = await this.db.queryOne<SummaryRow>(sql, [summaryId]);
     return row ? toSummaryRecord(row) : null;
   }
 
   async getSummariesByConversation(conversationId: number): Promise<SummaryRecord[]> {
-    const result = await this.db.query<SummaryRow>(
-      `SELECT summary_id, conversation_id, kind, depth, content, token_count, file_ids,
-              earliest_at, latest_at, descendant_count, created_at
-              , descendant_token_count, source_message_token_count
-     FROM summaries
-     WHERE conversation_id = ?
-     ORDER BY created_at`,
-      [conversationId],
-    );
+    const sql = this.backend === 'postgres'
+      ? `SELECT summary_id, conversation_id, kind, depth, content, token_count, file_ids,
+                earliest_at, latest_at, descendant_count, created_at
+                , descendant_token_count, source_message_token_count
+       FROM summaries
+       WHERE conversation_id = $1
+       ORDER BY created_at`
+      : `SELECT summary_id, conversation_id, kind, depth, content, token_count, file_ids,
+                earliest_at, latest_at, descendant_count, created_at
+                , descendant_token_count, source_message_token_count
+       FROM summaries
+       WHERE conversation_id = ?
+       ORDER BY created_at`;
+
+    const result = await this.db.query<SummaryRow>(sql, [conversationId]);
     return result.rows.map(toSummaryRecord);
   }
 
@@ -377,13 +406,16 @@ export class SummaryStore {
       return;
     }
 
-    for (let idx = 0; idx < messageIds.length; idx++) {
-      await this.db.run(
-        `INSERT INTO summary_messages (summary_id, message_id, ordinal)
+    const sql = this.backend === 'postgres'
+      ? `INSERT INTO summary_messages (summary_id, message_id, ordinal)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (summary_id, message_id) DO NOTHING`
+      : `INSERT INTO summary_messages (summary_id, message_id, ordinal)
          VALUES (?, ?, ?)
-         ON CONFLICT (summary_id, message_id) DO NOTHING`,
-        [summaryId, messageIds[idx], idx],
-      );
+         ON CONFLICT (summary_id, message_id) DO NOTHING`;
+
+    for (let idx = 0; idx < messageIds.length; idx++) {
+      await this.db.run(sql, [summaryId, messageIds[idx], idx]);
     }
   }
 
@@ -392,51 +424,71 @@ export class SummaryStore {
       return;
     }
 
-    for (let idx = 0; idx < parentSummaryIds.length; idx++) {
-      await this.db.run(
-        `INSERT INTO summary_parents (summary_id, parent_summary_id, ordinal)
+    const sql = this.backend === 'postgres'
+      ? `INSERT INTO summary_parents (summary_id, parent_summary_id, ordinal)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (summary_id, parent_summary_id) DO NOTHING`
+      : `INSERT INTO summary_parents (summary_id, parent_summary_id, ordinal)
          VALUES (?, ?, ?)
-         ON CONFLICT (summary_id, parent_summary_id) DO NOTHING`,
-        [summaryId, parentSummaryIds[idx], idx],
-      );
+         ON CONFLICT (summary_id, parent_summary_id) DO NOTHING`;
+
+    for (let idx = 0; idx < parentSummaryIds.length; idx++) {
+      await this.db.run(sql, [summaryId, parentSummaryIds[idx], idx]);
     }
   }
 
   async getSummaryMessages(summaryId: string): Promise<number[]> {
-    const result = await this.db.query<MessageIdRow>(
-      `SELECT message_id FROM summary_messages
-     WHERE summary_id = ?
-     ORDER BY ordinal`,
-      [summaryId],
-    );
+    const sql = this.backend === 'postgres'
+      ? `SELECT message_id FROM summary_messages
+       WHERE summary_id = $1
+       ORDER BY ordinal`
+      : `SELECT message_id FROM summary_messages
+       WHERE summary_id = ?
+       ORDER BY ordinal`;
+
+    const result = await this.db.query<MessageIdRow>(sql, [summaryId]);
     return result.rows.map((r) => r.message_id);
   }
 
   async getSummaryChildren(parentSummaryId: string): Promise<SummaryRecord[]> {
-    const result = await this.db.query<SummaryRow>(
-      `SELECT s.summary_id, s.conversation_id, s.kind, s.depth, s.content, s.token_count,
-              s.file_ids, s.earliest_at, s.latest_at, s.descendant_count, s.created_at
-              , s.descendant_token_count, s.source_message_token_count
-     FROM summaries s
-     JOIN summary_parents sp ON sp.summary_id = s.summary_id
-     WHERE sp.parent_summary_id = ?
-     ORDER BY sp.ordinal`,
-      [parentSummaryId],
-    );
+    const sql = this.backend === 'postgres'
+      ? `SELECT s.summary_id, s.conversation_id, s.kind, s.depth, s.content, s.token_count,
+                s.file_ids, s.earliest_at, s.latest_at, s.descendant_count, s.created_at
+                , s.descendant_token_count, s.source_message_token_count
+       FROM summaries s
+       JOIN summary_parents sp ON sp.summary_id = s.summary_id
+       WHERE sp.parent_summary_id = $1
+       ORDER BY sp.ordinal`
+      : `SELECT s.summary_id, s.conversation_id, s.kind, s.depth, s.content, s.token_count,
+                s.file_ids, s.earliest_at, s.latest_at, s.descendant_count, s.created_at
+                , s.descendant_token_count, s.source_message_token_count
+       FROM summaries s
+       JOIN summary_parents sp ON sp.summary_id = s.summary_id
+       WHERE sp.parent_summary_id = ?
+       ORDER BY sp.ordinal`;
+
+    const result = await this.db.query<SummaryRow>(sql, [parentSummaryId]);
     return result.rows.map(toSummaryRecord);
   }
 
   async getSummaryParents(summaryId: string): Promise<SummaryRecord[]> {
-    const result = await this.db.query<SummaryRow>(
-      `SELECT s.summary_id, s.conversation_id, s.kind, s.depth, s.content, s.token_count,
-              s.file_ids, s.earliest_at, s.latest_at, s.descendant_count, s.created_at
-              , s.descendant_token_count, s.source_message_token_count
-     FROM summaries s
-     JOIN summary_parents sp ON sp.parent_summary_id = s.summary_id
-     WHERE sp.summary_id = ?
-     ORDER BY sp.ordinal`,
-      [summaryId],
-    );
+    const sql = this.backend === 'postgres'
+      ? `SELECT s.summary_id, s.conversation_id, s.kind, s.depth, s.content, s.token_count,
+                s.file_ids, s.earliest_at, s.latest_at, s.descendant_count, s.created_at
+                , s.descendant_token_count, s.source_message_token_count
+       FROM summaries s
+       JOIN summary_parents sp ON sp.parent_summary_id = s.summary_id
+       WHERE sp.summary_id = $1
+       ORDER BY sp.ordinal`
+      : `SELECT s.summary_id, s.conversation_id, s.kind, s.depth, s.content, s.token_count,
+                s.file_ids, s.earliest_at, s.latest_at, s.descendant_count, s.created_at
+                , s.descendant_token_count, s.source_message_token_count
+       FROM summaries s
+       JOIN summary_parents sp ON sp.parent_summary_id = s.summary_id
+       WHERE sp.summary_id = ?
+       ORDER BY sp.ordinal`;
+
+    const result = await this.db.query<SummaryRow>(sql, [summaryId]);
     return result.rows.map(toSummaryRecord);
   }
 
@@ -451,9 +503,11 @@ export class SummaryStore {
            ELSE subtree.path || '.' || printf('%04d', sp.ordinal)
          END`;
 
+    const placeholder = this.backend === 'postgres' ? '$1' : '?';
+
     const result = await this.db.query<SummarySubtreeRow>(
       `WITH RECURSIVE subtree(summary_id, parent_summary_id, depth_from_root, path) AS (
-         SELECT ?, NULL, 0, ''
+         SELECT ${placeholder}, NULL, 0, ''
          UNION ALL
          SELECT
            sp.summary_id,
@@ -515,13 +569,17 @@ export class SummaryStore {
   // ── Context items ─────────────────────────────────────────────────────────
 
   async getContextItems(conversationId: number): Promise<ContextItemRecord[]> {
-    const result = await this.db.query<ContextItemRow>(
-      `SELECT conversation_id, ordinal, item_type, message_id, summary_id, created_at
-     FROM context_items
-     WHERE conversation_id = ?
-     ORDER BY ordinal`,
-      [conversationId],
-    );
+    const sql = this.backend === 'postgres'
+      ? `SELECT conversation_id, ordinal, item_type, message_id, summary_id, created_at
+       FROM context_items
+       WHERE conversation_id = $1
+       ORDER BY ordinal`
+      : `SELECT conversation_id, ordinal, item_type, message_id, summary_id, created_at
+       FROM context_items
+       WHERE conversation_id = ?
+       ORDER BY ordinal`;
+
+    const result = await this.db.query<ContextItemRow>(sql, [conversationId]);
     return result.rows.map(toContextItemRecord);
   }
 
@@ -535,40 +593,64 @@ export class SummaryStore {
       Number.isFinite(maxOrdinalExclusive) &&
       maxOrdinalExclusive !== Infinity;
 
-    const sql = useOrdinalBound
-      ? `SELECT DISTINCT s.depth
-         FROM context_items ci
-         JOIN summaries s ON s.summary_id = ci.summary_id
-         WHERE ci.conversation_id = ?
-           AND ci.item_type = 'summary'
-           AND ci.ordinal < ?
-         ORDER BY s.depth ASC`
-      : `SELECT DISTINCT s.depth
-         FROM context_items ci
-         JOIN summaries s ON s.summary_id = ci.summary_id
-         WHERE ci.conversation_id = ?
-           AND ci.item_type = 'summary'
-         ORDER BY s.depth ASC`;
+    let sql: string;
+    let params: unknown[];
 
-    const result = useOrdinalBound
-      ? await this.db.query<DistinctDepthRow>(sql, [conversationId, Math.floor(maxOrdinalExclusive)])
-      : await this.db.query<DistinctDepthRow>(sql, [conversationId]);
+    if (this.backend === 'postgres') {
+      sql = useOrdinalBound
+        ? `SELECT DISTINCT s.depth
+           FROM context_items ci
+           JOIN summaries s ON s.summary_id = ci.summary_id
+           WHERE ci.conversation_id = $1
+             AND ci.item_type = 'summary'
+             AND ci.ordinal < $2
+           ORDER BY s.depth ASC`
+        : `SELECT DISTINCT s.depth
+           FROM context_items ci
+           JOIN summaries s ON s.summary_id = ci.summary_id
+           WHERE ci.conversation_id = $1
+             AND ci.item_type = 'summary'
+           ORDER BY s.depth ASC`;
+      params = useOrdinalBound ? [conversationId, Math.floor(maxOrdinalExclusive)] : [conversationId];
+    } else {
+      sql = useOrdinalBound
+        ? `SELECT DISTINCT s.depth
+           FROM context_items ci
+           JOIN summaries s ON s.summary_id = ci.summary_id
+           WHERE ci.conversation_id = ?
+             AND ci.item_type = 'summary'
+             AND ci.ordinal < ?
+           ORDER BY s.depth ASC`
+        : `SELECT DISTINCT s.depth
+           FROM context_items ci
+           JOIN summaries s ON s.summary_id = ci.summary_id
+           WHERE ci.conversation_id = ?
+             AND ci.item_type = 'summary'
+           ORDER BY s.depth ASC`;
+      params = useOrdinalBound ? [conversationId, Math.floor(maxOrdinalExclusive)] : [conversationId];
+    }
+
+    const result = await this.db.query<DistinctDepthRow>(sql, params);
 
     return result.rows.map((row) => row.depth);
   }
 
   async appendContextMessage(conversationId: number, messageId: number): Promise<void> {
-    const row = await this.db.queryOne<MaxOrdinalRow>(
-      `SELECT COALESCE(MAX(ordinal), -1) AS max_ordinal
-     FROM context_items WHERE conversation_id = ?`,
-      [conversationId],
-    );
+    const selectSql = this.backend === 'postgres'
+      ? `SELECT COALESCE(MAX(ordinal), -1) AS max_ordinal
+       FROM context_items WHERE conversation_id = $1`
+      : `SELECT COALESCE(MAX(ordinal), -1) AS max_ordinal
+       FROM context_items WHERE conversation_id = ?`;
 
-    await this.db.run(
-      `INSERT INTO context_items (conversation_id, ordinal, item_type, message_id)
-     VALUES (?, ?, 'message', ?)`,
-      [conversationId, row?.max_ordinal ?? -1 + 1, messageId],
-    );
+    const row = await this.db.queryOne<MaxOrdinalRow>(selectSql, [conversationId]);
+
+    const insertSql = this.backend === 'postgres'
+      ? `INSERT INTO context_items (conversation_id, ordinal, item_type, message_id)
+       VALUES ($1, $2, 'message', $3)`
+      : `INSERT INTO context_items (conversation_id, ordinal, item_type, message_id)
+       VALUES (?, ?, 'message', ?)`;
+
+    await this.db.run(insertSql, [conversationId, row?.max_ordinal ?? -1 + 1, messageId]);
   }
 
   async appendContextMessages(conversationId: number, messageIds: number[]): Promise<void> {
@@ -576,34 +658,42 @@ export class SummaryStore {
       return;
     }
 
-    const row = await this.db.queryOne<MaxOrdinalRow>(
-      `SELECT COALESCE(MAX(ordinal), -1) AS max_ordinal
-     FROM context_items WHERE conversation_id = ?`,
-      [conversationId],
-    );
+    const selectSql = this.backend === 'postgres'
+      ? `SELECT COALESCE(MAX(ordinal), -1) AS max_ordinal
+       FROM context_items WHERE conversation_id = $1`
+      : `SELECT COALESCE(MAX(ordinal), -1) AS max_ordinal
+       FROM context_items WHERE conversation_id = ?`;
+
+    const row = await this.db.queryOne<MaxOrdinalRow>(selectSql, [conversationId]);
     const baseOrdinal = (row?.max_ordinal ?? -1) + 1;
 
+    const insertSql = this.backend === 'postgres'
+      ? `INSERT INTO context_items (conversation_id, ordinal, item_type, message_id)
+       VALUES ($1, $2, 'message', $3)`
+      : `INSERT INTO context_items (conversation_id, ordinal, item_type, message_id)
+       VALUES (?, ?, 'message', ?)`;
+
     for (let idx = 0; idx < messageIds.length; idx++) {
-      await this.db.run(
-        `INSERT INTO context_items (conversation_id, ordinal, item_type, message_id)
-         VALUES (?, ?, 'message', ?)`,
-        [conversationId, baseOrdinal + idx, messageIds[idx]],
-      );
+      await this.db.run(insertSql, [conversationId, baseOrdinal + idx, messageIds[idx]]);
     }
   }
 
   async appendContextSummary(conversationId: number, summaryId: string): Promise<void> {
-    const row = await this.db.queryOne<MaxOrdinalRow>(
-      `SELECT COALESCE(MAX(ordinal), -1) AS max_ordinal
-     FROM context_items WHERE conversation_id = ?`,
-      [conversationId],
-    );
+    const selectSql = this.backend === 'postgres'
+      ? `SELECT COALESCE(MAX(ordinal), -1) AS max_ordinal
+       FROM context_items WHERE conversation_id = $1`
+      : `SELECT COALESCE(MAX(ordinal), -1) AS max_ordinal
+       FROM context_items WHERE conversation_id = ?`;
 
-    await this.db.run(
-      `INSERT INTO context_items (conversation_id, ordinal, item_type, summary_id)
-     VALUES (?, ?, 'summary', ?)`,
-      [conversationId, row?.max_ordinal ?? -1 + 1, summaryId],
-    );
+    const row = await this.db.queryOne<MaxOrdinalRow>(selectSql, [conversationId]);
+
+    const insertSql = this.backend === 'postgres'
+      ? `INSERT INTO context_items (conversation_id, ordinal, item_type, summary_id)
+       VALUES ($1, $2, 'summary', $3)`
+      : `INSERT INTO context_items (conversation_id, ordinal, item_type, summary_id)
+       VALUES (?, ?, 'summary', ?)`;
+
+    await this.db.run(insertSql, [conversationId, row?.max_ordinal ?? -1 + 1, summaryId]);
   }
 
   async replaceContextRangeWithSummary(input: {
@@ -615,72 +705,95 @@ export class SummaryStore {
     const { conversationId, startOrdinal, endOrdinal, summaryId } = input;
 
     return this.db.transaction(async () => {
+      const deleteSql = this.backend === 'postgres'
+        ? `DELETE FROM context_items
+         WHERE conversation_id = $1
+           AND ordinal >= $2
+           AND ordinal <= $3`
+        : `DELETE FROM context_items
+         WHERE conversation_id = ?
+           AND ordinal >= ?
+           AND ordinal <= ?`;
+
       // 1. Delete context items in the range [startOrdinal, endOrdinal]
-      await this.db.run(
-        `DELETE FROM context_items
-       WHERE conversation_id = ?
-         AND ordinal >= ?
-         AND ordinal <= ?`,
-        [conversationId, startOrdinal, endOrdinal],
-      );
+      await this.db.run(deleteSql, [conversationId, startOrdinal, endOrdinal]);
+
+      const insertSql = this.backend === 'postgres'
+        ? `INSERT INTO context_items (conversation_id, ordinal, item_type, summary_id)
+         VALUES ($1, $2, 'summary', $3)`
+        : `INSERT INTO context_items (conversation_id, ordinal, item_type, summary_id)
+         VALUES (?, ?, 'summary', ?)`;
 
       // 2. Insert the replacement summary item at startOrdinal
-      await this.db.run(
-        `INSERT INTO context_items (conversation_id, ordinal, item_type, summary_id)
-       VALUES (?, ?, 'summary', ?)`,
-        [conversationId, startOrdinal, summaryId],
-      );
+      await this.db.run(insertSql, [conversationId, startOrdinal, summaryId]);
 
       // 3. Resequence all ordinals to maintain contiguity (no gaps).
       //    Fetch current items, then update ordinals in order.
-      const result = await this.db.query<{ ordinal: number }>(
-        `SELECT ordinal FROM context_items
-       WHERE conversation_id = ?
-       ORDER BY ordinal`,
-        [conversationId],
-      );
+      const selectSql = this.backend === 'postgres'
+        ? `SELECT ordinal FROM context_items
+         WHERE conversation_id = $1
+         ORDER BY ordinal`
+        : `SELECT ordinal FROM context_items
+         WHERE conversation_id = ?
+         ORDER BY ordinal`;
+
+      const result = await this.db.query<{ ordinal: number }>(selectSql, [conversationId]);
       const items = result.rows;
+
+      const updateSql = this.backend === 'postgres'
+        ? `UPDATE context_items
+         SET ordinal = $1
+         WHERE conversation_id = $2 AND ordinal = $3`
+        : `UPDATE context_items
+         SET ordinal = ?
+         WHERE conversation_id = ? AND ordinal = ?`;
 
       // Use negative temp ordinals first to avoid unique constraint conflicts
       for (let i = 0; i < items.length; i++) {
-        await this.db.run(
-          `UPDATE context_items
-         SET ordinal = ?
-         WHERE conversation_id = ? AND ordinal = ?`,
-          [-(i + 1), conversationId, items[i].ordinal],
-        );
+        await this.db.run(updateSql, [-(i + 1), conversationId, items[i].ordinal]);
       }
       for (let i = 0; i < items.length; i++) {
-        await this.db.run(
-          `UPDATE context_items
-         SET ordinal = ?
-         WHERE conversation_id = ? AND ordinal = ?`,
-          [i, conversationId, -(i + 1)],
-        );
+        await this.db.run(updateSql, [i, conversationId, -(i + 1)]);
       }
     });
   }
 
   async getContextTokenCount(conversationId: number): Promise<number> {
-    const row = await this.db.queryOne<TokenSumRow>(
-      `SELECT COALESCE(SUM(token_count), 0) AS total
-     FROM (
-       SELECT m.token_count
-       FROM context_items ci
-       JOIN messages m ON m.message_id = ci.message_id
-       WHERE ci.conversation_id = ?
-         AND ci.item_type = 'message'
+    const sql = this.backend === 'postgres'
+      ? `SELECT COALESCE(SUM(token_count), 0) AS total
+       FROM (
+         SELECT m.token_count
+         FROM context_items ci
+         JOIN messages m ON m.message_id = ci.message_id
+         WHERE ci.conversation_id = $1
+           AND ci.item_type = 'message'
 
-       UNION ALL
+         UNION ALL
 
-       SELECT s.token_count
-       FROM context_items ci
-       JOIN summaries s ON s.summary_id = ci.summary_id
-       WHERE ci.conversation_id = ?
-         AND ci.item_type = 'summary'
-     ) sub`,
-      [conversationId, conversationId],
-    );
+         SELECT s.token_count
+         FROM context_items ci
+         JOIN summaries s ON s.summary_id = ci.summary_id
+         WHERE ci.conversation_id = $1
+           AND ci.item_type = 'summary'
+       ) sub`
+      : `SELECT COALESCE(SUM(token_count), 0) AS total
+       FROM (
+         SELECT m.token_count
+         FROM context_items ci
+         JOIN messages m ON m.message_id = ci.message_id
+         WHERE ci.conversation_id = ?
+           AND ci.item_type = 'message'
+
+         UNION ALL
+
+         SELECT s.token_count
+         FROM context_items ci
+         JOIN summaries s ON s.summary_id = ci.summary_id
+         WHERE ci.conversation_id = ?
+           AND ci.item_type = 'summary'
+       ) sub`;
+
+    const row = await this.db.queryOne<TokenSumRow>(sql, [conversationId]);
     return row?.total ?? 0;
   }
 
@@ -948,25 +1061,29 @@ export class SummaryStore {
   // ── Large files ───────────────────────────────────────────────────────────
 
   async insertLargeFile(input: CreateLargeFileInput): Promise<LargeFileRecord> {
-    await this.db.run(
-      `INSERT INTO large_files (file_id, conversation_id, file_name, mime_type, byte_size, storage_uri, exploration_summary)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        input.fileId,
-        input.conversationId,
-        input.fileName ?? null,
-        input.mimeType ?? null,
-        input.byteSize ?? null,
-        input.storageUri,
-        input.explorationSummary ?? null,
-      ],
-    );
+    const insertSql = this.backend === 'postgres'
+      ? `INSERT INTO large_files (file_id, conversation_id, file_name, mime_type, byte_size, storage_uri, exploration_summary)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`
+      : `INSERT INTO large_files (file_id, conversation_id, file_name, mime_type, byte_size, storage_uri, exploration_summary)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`;
 
-    const row = await this.db.queryOne<LargeFileRow>(
-      `SELECT file_id, conversation_id, file_name, mime_type, byte_size, storage_uri, exploration_summary, created_at
-     FROM large_files WHERE file_id = ?`,
-      [input.fileId],
-    );
+    await this.db.run(insertSql, [
+      input.fileId,
+      input.conversationId,
+      input.fileName ?? null,
+      input.mimeType ?? null,
+      input.byteSize ?? null,
+      input.storageUri,
+      input.explorationSummary ?? null,
+    ]);
+
+    const selectSql = this.backend === 'postgres'
+      ? `SELECT file_id, conversation_id, file_name, mime_type, byte_size, storage_uri, exploration_summary, created_at
+       FROM large_files WHERE file_id = $1`
+      : `SELECT file_id, conversation_id, file_name, mime_type, byte_size, storage_uri, exploration_summary, created_at
+       FROM large_files WHERE file_id = ?`;
+
+    const row = await this.db.queryOne<LargeFileRow>(selectSql, [input.fileId]);
 
     if (!row) {
       throw new Error(`Failed to retrieve inserted large file ${input.fileId}`);
@@ -976,22 +1093,28 @@ export class SummaryStore {
   }
 
   async getLargeFile(fileId: string): Promise<LargeFileRecord | null> {
-    const row = await this.db.queryOne<LargeFileRow>(
-      `SELECT file_id, conversation_id, file_name, mime_type, byte_size, storage_uri, exploration_summary, created_at
-     FROM large_files WHERE file_id = ?`,
-      [fileId],
-    );
+    const sql = this.backend === 'postgres'
+      ? `SELECT file_id, conversation_id, file_name, mime_type, byte_size, storage_uri, exploration_summary, created_at
+       FROM large_files WHERE file_id = $1`
+      : `SELECT file_id, conversation_id, file_name, mime_type, byte_size, storage_uri, exploration_summary, created_at
+       FROM large_files WHERE file_id = ?`;
+
+    const row = await this.db.queryOne<LargeFileRow>(sql, [fileId]);
     return row ? toLargeFileRecord(row) : null;
   }
 
   async getLargeFilesByConversation(conversationId: number): Promise<LargeFileRecord[]> {
-    const result = await this.db.query<LargeFileRow>(
-      `SELECT file_id, conversation_id, file_name, mime_type, byte_size, storage_uri, exploration_summary, created_at
-     FROM large_files
-     WHERE conversation_id = ?
-     ORDER BY created_at`,
-      [conversationId],
-    );
+    const sql = this.backend === 'postgres'
+      ? `SELECT file_id, conversation_id, file_name, mime_type, byte_size, storage_uri, exploration_summary, created_at
+       FROM large_files
+       WHERE conversation_id = $1
+       ORDER BY created_at`
+      : `SELECT file_id, conversation_id, file_name, mime_type, byte_size, storage_uri, exploration_summary, created_at
+       FROM large_files
+       WHERE conversation_id = ?
+       ORDER BY created_at`;
+
+    const result = await this.db.query<LargeFileRow>(sql, [conversationId]);
     return result.rows.map(toLargeFileRecord);
   }
 }

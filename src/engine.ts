@@ -661,6 +661,8 @@ export class LcmContextEngine implements ContextEngine {
     await previous.catch(() => {});
     try {
       return await operation();
+    } catch (error) {
+      throw error;
     } finally {
       releaseQueue();
       void next.finally(() => {
