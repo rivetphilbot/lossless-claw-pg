@@ -650,7 +650,7 @@ export class SummaryStore {
       : `INSERT INTO context_items (conversation_id, ordinal, item_type, message_id)
        VALUES (?, ?, 'message', ?)`;
 
-    await this.db.run(insertSql, [conversationId, row?.max_ordinal ?? -1 + 1, messageId]);
+    await this.db.run(insertSql, [conversationId, (row?.max_ordinal ?? -1) + 1, messageId]);
   }
 
   async appendContextMessages(conversationId: number, messageIds: number[]): Promise<void> {
@@ -693,7 +693,7 @@ export class SummaryStore {
       : `INSERT INTO context_items (conversation_id, ordinal, item_type, summary_id)
        VALUES (?, ?, 'summary', ?)`;
 
-    await this.db.run(insertSql, [conversationId, row?.max_ordinal ?? -1 + 1, summaryId]);
+    await this.db.run(insertSql, [conversationId, (row?.max_ordinal ?? -1) + 1, summaryId]);
   }
 
   async replaceContextRangeWithSummary(input: {
@@ -892,17 +892,17 @@ export class SummaryStore {
     let paramIndex = 2;
 
     if (conversationId != null) {
-      where.push(`conversation_id = ${paramIndex}`);
+      where.push(`conversation_id = $${paramIndex}`);
       args.push(conversationId);
       paramIndex++;
     }
     if (since) {
-      where.push(`created_at >= ${paramIndex}`);
+      where.push(`created_at >= $${paramIndex}`);
       args.push(since.toISOString());
       paramIndex++;
     }
     if (before) {
-      where.push(`created_at < ${paramIndex}`);
+      where.push(`created_at < $${paramIndex}`);
       args.push(before.toISOString());
       paramIndex++;
     }
@@ -917,7 +917,7 @@ export class SummaryStore {
        FROM summaries
        WHERE ${where.join(" AND ")}
        ORDER BY created_at DESC
-       LIMIT ${paramIndex}`;
+       LIMIT $${paramIndex}`;
     
     args.push(limit);
     const result = await this.db.query<SummarySearchRow>(sql, args);
@@ -1015,17 +1015,36 @@ export class SummaryStore {
 
     const where: string[] = [];
     const args: Array<string | number> = [];
-    if (conversationId != null) {
-      where.push("conversation_id = ?");
-      args.push(conversationId);
-    }
-    if (since) {
-      where.push("julianday(created_at) >= julianday(?)");
-      args.push(since.toISOString());
-    }
-    if (before) {
-      where.push("julianday(created_at) < julianday(?)");
-      args.push(before.toISOString());
+    if (this.backend === 'postgres') {
+      let paramIdx = 1;
+      if (conversationId != null) {
+        where.push(`conversation_id = $${paramIdx}`);
+        args.push(conversationId);
+        paramIdx++;
+      }
+      if (since) {
+        where.push(`created_at >= $${paramIdx}`);
+        args.push(since.toISOString());
+        paramIdx++;
+      }
+      if (before) {
+        where.push(`created_at < $${paramIdx}`);
+        args.push(before.toISOString());
+        paramIdx++;
+      }
+    } else {
+      if (conversationId != null) {
+        where.push("conversation_id = ?");
+        args.push(conversationId);
+      }
+      if (since) {
+        where.push("julianday(created_at) >= julianday(?)");
+        args.push(since.toISOString());
+      }
+      if (before) {
+        where.push("julianday(created_at) < julianday(?)");
+        args.push(before.toISOString());
+      }
     }
     const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
     const result = await this.db.query<SummaryRow>(
