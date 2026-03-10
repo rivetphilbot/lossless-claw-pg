@@ -55,7 +55,7 @@ export async function resolveLcmConversationScope(input: {
     return { conversationId: explicitConversationId, allConversations: false };
   }
 
-  if (params.allConversations === true) {
+  if (params.allConversations !== false) {
     return { conversationId: undefined, allConversations: true };
   }
 
