@@ -943,7 +943,7 @@ export class SummaryStore {
     if (this.backend === 'postgres') {
       // Convert ? placeholders to $n for PostgreSQL
       where = plan.where.map((clause) => {
-        return clause.replace(/\?/g, () => `$${paramCounter++}`).replace(/ESCAPE '\\\\'/g, "ESCAPE '\\'");
+        return clause.replace(/\?/g, () => `$${paramCounter++}`);
       });
 
       if (conversationId != null) {

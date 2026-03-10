@@ -833,12 +833,12 @@ export class ConversationStore {
 
     let where: string[] = [...plan.where];
     let args: Array<string | number> = [...plan.args];
-    let paramCounter = args.length + 1;
+    let paramCounter = 1;
 
     if (this.backend === 'postgres') {
       // Convert ? placeholders to $n for PostgreSQL
       where = plan.where.map((clause) => {
-        return clause.replace(/\?/g, () => `$${paramCounter++}`).replace(/ESCAPE '\\\\'/g, "ESCAPE '\\'");
+        return clause.replace(/\?/g, () => `$${paramCounter++}`);
       });
     }
 
@@ -860,7 +860,7 @@ export class ConversationStore {
     args.push(limit);
 
     const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
-    const limitPlaceholder = this.backend === 'postgres' ? `${paramCounter}` : '?';
+    const limitPlaceholder = this.backend === 'postgres' ? `$${paramCounter}` : '?';
     const limitClause = `LIMIT ${limitPlaceholder}`;
     
     const sql = `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
