@@ -241,14 +241,14 @@ function toLargeFileRecord(row: LargeFileRow): LargeFileRecord {
 // ── SummaryStore ──────────────────────────────────────────────────────────────
 
 export class SummaryStore {
-  private readonly fts5Available: boolean;
+  private readonly fullTextAvailable: boolean;
   private readonly backend: 'sqlite' | 'postgres';
 
   constructor(
     private db: DbClient,
-    options?: { fts5Available?: boolean; backend?: 'sqlite' | 'postgres' },
+    options?: { fullTextAvailable?: boolean; backend?: 'sqlite' | 'postgres' },
   ) {
-    this.fts5Available = options?.fts5Available ?? true;
+    this.fullTextAvailable = options?.fullTextAvailable ?? true;
     this.backend = options?.backend ?? 'sqlite';
   }
 
@@ -329,7 +329,7 @@ export class SummaryStore {
 
     // Index in FTS5 as best-effort; compaction flow must continue even if
     // FTS indexing fails for any reason.
-    if (!this.fts5Available) {
+    if (!this.fullTextAvailable) {
       return toSummaryRecord(row);
     }
 
@@ -441,6 +441,16 @@ export class SummaryStore {
   }
 
   async getSummarySubtree(summaryId: string): Promise<SummarySubtreeNodeRecord[]> {
+    const pathSql = this.backend === 'postgres'
+      ? `CASE
+           WHEN subtree.path = '' THEN LPAD(sp.ordinal::text, 4, '0')
+           ELSE subtree.path || '.' || LPAD(sp.ordinal::text, 4, '0')
+         END`
+      : `CASE
+           WHEN subtree.path = '' THEN printf('%04d', sp.ordinal)
+           ELSE subtree.path || '.' || printf('%04d', sp.ordinal)
+         END`;
+
     const result = await this.db.query<SummarySubtreeRow>(
       `WITH RECURSIVE subtree(summary_id, parent_summary_id, depth_from_root, path) AS (
          SELECT ?, NULL, 0, ''
@@ -449,10 +459,7 @@ export class SummaryStore {
            sp.summary_id,
            sp.parent_summary_id,
            subtree.depth_from_root + 1,
-           CASE
-             WHEN subtree.path = '' THEN printf('%04d', sp.ordinal)
-             ELSE subtree.path || '.' || printf('%04d', sp.ordinal)
-           END
+           ${pathSql}
          FROM summary_parents sp
          JOIN subtree ON sp.parent_summary_id = subtree.summary_id
        )
@@ -607,8 +614,7 @@ export class SummaryStore {
   }): Promise<void> {
     const { conversationId, startOrdinal, endOrdinal, summaryId } = input;
 
-    await this.db.run("BEGIN");
-    try {
+    return this.db.transaction(async () => {
       // 1. Delete context items in the range [startOrdinal, endOrdinal]
       await this.db.run(
         `DELETE FROM context_items
@@ -652,12 +658,7 @@ export class SummaryStore {
           [i, conversationId, -(i + 1)],
         );
       }
-
-      await this.db.run("COMMIT");
-    } catch (err) {
-      await this.db.run("ROLLBACK");
-      throw err;
-    }
+    });
   }
 
   async getContextTokenCount(conversationId: number): Promise<number> {
@@ -689,9 +690,9 @@ export class SummaryStore {
     const limit = input.limit ?? 50;
 
     if (input.mode === "full_text") {
-      if (this.fts5Available) {
+      if (this.fullTextAvailable) {
         try {
-          return this.searchFullText(
+          return await this.searchFullText(
             input.query,
             limit,
             input.conversationId,
@@ -699,7 +700,7 @@ export class SummaryStore {
             input.before,
           );
         } catch {
-          return this.searchLike(
+          return await this.searchLike(
             input.query,
             limit,
             input.conversationId,
@@ -708,12 +709,26 @@ export class SummaryStore {
           );
         }
       }
-      return this.searchLike(input.query, limit, input.conversationId, input.since, input.before);
+      return await this.searchLike(input.query, limit, input.conversationId, input.since, input.before);
     }
     return this.searchRegex(input.query, limit, input.conversationId, input.since, input.before);
   }
 
   private async searchFullText(
+    query: string,
+    limit: number,
+    conversationId?: number,
+    since?: Date,
+    before?: Date,
+  ): Promise<SummarySearchResult[]> {
+    if (this.backend === 'postgres') {
+      return this.searchSummariesFullTextPostgres(query, limit, conversationId, since, before);
+    } else {
+      return this.searchSummariesFullTextSqlite(query, limit, conversationId, since, before);
+    }
+  }
+
+  private async searchSummariesFullTextSqlite(
     query: string,
     limit: number,
     conversationId?: number,
@@ -727,11 +742,11 @@ export class SummaryStore {
       args.push(conversationId);
     }
     if (since) {
-      where.push("julianday(s.created_at) >= julianday(?)");
+      where.push("s.created_at >= ?");
       args.push(since.toISOString());
     }
     if (before) {
-      where.push("julianday(s.created_at) < julianday(?)");
+      where.push("s.created_at < ?");
       args.push(before.toISOString());
     }
     args.push(limit);
@@ -752,6 +767,50 @@ export class SummaryStore {
     return result.rows.map(toSearchResult);
   }
 
+  private async searchSummariesFullTextPostgres(
+    query: string,
+    limit: number,
+    conversationId?: number,
+    since?: Date,
+    before?: Date,
+  ): Promise<SummarySearchResult[]> {
+    const where: string[] = ["content_tsvector @@ plainto_tsquery('english', $1)"];
+    const args: Array<string | number> = [sanitizeTsQuery(query)];
+    let paramIndex = 2;
+
+    if (conversationId != null) {
+      where.push(`conversation_id = ${paramIndex}`);
+      args.push(conversationId);
+      paramIndex++;
+    }
+    if (since) {
+      where.push(`created_at >= ${paramIndex}`);
+      args.push(since.toISOString());
+      paramIndex++;
+    }
+    if (before) {
+      where.push(`created_at < ${paramIndex}`);
+      args.push(before.toISOString());
+      paramIndex++;
+    }
+
+    const sql = `SELECT
+         summary_id,
+         conversation_id,
+         kind,
+         ts_headline('english', content, plainto_tsquery('english', $1), 'MaxWords=32') AS snippet,
+         ts_rank(content_tsvector, plainto_tsquery('english', $1)) AS rank,
+         created_at
+       FROM summaries
+       WHERE ${where.join(" AND ")}
+       ORDER BY created_at DESC
+       LIMIT ${paramIndex}`;
+    
+    args.push(limit);
+    const result = await this.db.query<SummarySearchRow>(sql, args);
+    return result.rows.map(toSearchResult);
+  }
+
   private async searchLike(
     query: string,
     limit: number,
@@ -764,23 +823,53 @@ export class SummaryStore {
       return [];
     }
 
-    const where: string[] = [...plan.where];
-    const args: Array<string | number> = [...plan.args];
-    if (conversationId != null) {
-      where.push("conversation_id = ?");
-      args.push(conversationId);
+    let where: string[] = [...plan.where];
+    let args: Array<string | number> = [...plan.args];
+    let paramCounter = 1;
+
+    if (this.backend === 'postgres') {
+      // Convert ? placeholders to $n for PostgreSQL
+      where = plan.where.map((clause) => {
+        return clause.replace(/\?/g, () => `${paramCounter++}`);
+      });
+
+      if (conversationId != null) {
+        where.push(`conversation_id = $${paramCounter}`);
+        args.push(conversationId);
+        paramCounter++;
+      }
+      if (since) {
+        where.push(`created_at >= $${paramCounter}`);
+        args.push(since.toISOString());
+        paramCounter++;
+      }
+      if (before) {
+        where.push(`created_at < $${paramCounter}`);
+        args.push(before.toISOString());
+        paramCounter++;
+      }
+      args.push(limit);
+    } else {
+      // SQLite
+      if (conversationId != null) {
+        where.push("conversation_id = ?");
+        args.push(conversationId);
+      }
+      if (since) {
+        where.push("created_at >= ?");
+        args.push(since.toISOString());
+      }
+      if (before) {
+        where.push("created_at < ?");
+        args.push(before.toISOString());
+      }
+      args.push(limit);
     }
-    if (since) {
-      where.push("julianday(created_at) >= julianday(?)");
-      args.push(since.toISOString());
-    }
-    if (before) {
-      where.push("julianday(created_at) < julianday(?)");
-      args.push(before.toISOString());
-    }
-    args.push(limit);
 
     const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const limitPlaceholder = this.backend === 'postgres' ? `$${paramCounter}` : '?';
+    const limitClause = `LIMIT ${limitPlaceholder}`;
+    
     const result = await this.db.query<SummaryRow>(
       `SELECT summary_id, conversation_id, kind, depth, content, token_count, file_ids,
               earliest_at, latest_at, descendant_count, descendant_token_count,
@@ -788,7 +877,7 @@ export class SummaryStore {
        FROM summaries
        ${whereClause}
        ORDER BY created_at DESC
-       LIMIT ?`,
+       ${limitClause}`,
       args,
     );
 

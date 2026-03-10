@@ -949,7 +949,7 @@ const lcmPlugin = {
     );
 
     api.logger.info(
-      `[lcm] Plugin loaded (enabled=${deps.config.enabled}, db=${deps.config.databasePath}, threshold=${deps.config.contextThreshold})`,
+      `[lcm] Plugin loaded (enabled=${deps.config.enabled}, db=${deps.config.databasePath}, backend=${deps.config.backend}, threshold=${deps.config.contextThreshold})`,
     );
   },
 };

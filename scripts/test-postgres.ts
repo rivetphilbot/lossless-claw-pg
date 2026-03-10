@@ -61,7 +61,7 @@ async function main() {
     // Test conversation store
     console.log("🗃️ Testing ConversationStore...");
     const conversationStore = new ConversationStore(db, {
-      fts5Available: features.fts5Available,
+      fullTextAvailable: features.fullTextAvailable,
       backend: features.backend,
     });
 
@@ -96,7 +96,7 @@ async function main() {
     console.log("✅ Messages retrieved:", messages.length);
 
     // Test full-text search
-    if (features.fts5Available) {
+    if (features.fullTextAvailable) {
       console.log("🔍 Testing full-text search...");
       const searchResults = await conversationStore.searchMessages({
         query: "test",
@@ -111,7 +111,7 @@ async function main() {
     // Test summary store
     console.log("📋 Testing SummaryStore...");
     const summaryStore = new SummaryStore(db, {
-      fts5Available: features.fts5Available,
+      fullTextAvailable: features.fullTextAvailable,
       backend: features.backend,
     });
 
@@ -139,7 +139,7 @@ async function main() {
     console.log("");
     console.log("✅ PostgreSQL adapter is working correctly");
     console.log(`   Backend: ${features.backend}`);
-    console.log(`   FTS Available: ${features.fts5Available}`);
+    console.log(`   FTS Available: ${features.fullTextAvailable}`);
     console.log(`   Connection: ${config.connectionString?.replace(/:[^:@]*@/, ":***@")}`);
 
   } catch (error) {

@@ -569,7 +569,7 @@ export class LcmContextEngine implements ContextEngine {
   private compaction: CompactionEngine;
   private retrieval: RetrievalEngine;
   private migrated = false;
-  private readonly fts5Available: boolean;
+  private readonly fullTextAvailable: boolean;
   private sessionOperationQueues = new Map<string, Promise<void>>();
   private largeFileTextSummarizerResolved = false;
   private largeFileTextSummarizer?: (prompt: string) => Promise<string | null>;
@@ -581,18 +581,18 @@ export class LcmContextEngine implements ContextEngine {
 
     const db = createLcmConnection(this.config);
     const features = getLcmDbFeatures(this.config);
-    this.fts5Available = features.fts5Available;
+    this.fullTextAvailable = features.fullTextAvailable;
 
-    this.conversationStore = new ConversationStore(db, { 
-      fts5Available: this.fts5Available,
+    this.conversationStore = new ConversationStore(db, {
+      fullTextAvailable: this.fullTextAvailable,
       backend: features.backend
     });
-    this.summaryStore = new SummaryStore(db, { 
-      fts5Available: this.fts5Available,
+    this.summaryStore = new SummaryStore(db, {
+      fullTextAvailable: this.fullTextAvailable,
       backend: features.backend
     });
 
-    if (!this.fts5Available) {
+    if (!this.fullTextAvailable) {
       this.deps.log.warn(
         "[lcm] FTS5 unavailable in the current Node runtime; full_text search will fall back to LIKE and indexing is disabled",
       );
@@ -641,7 +641,7 @@ export class LcmContextEngine implements ContextEngine {
     const db = createLcmConnection(this.config);
     if ('getUnderlyingDatabase' in db) {
       const sqliteDb = (db as any).getUnderlyingDatabase();
-      runLcmMigrations(sqliteDb, { fts5Available: this.fts5Available });
+      runLcmMigrations(sqliteDb, { fullTextAvailable: this.fullTextAvailable });
     }
     this.migrated = true;
   }

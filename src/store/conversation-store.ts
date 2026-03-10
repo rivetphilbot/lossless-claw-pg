@@ -206,14 +206,14 @@ function toMessagePartRecord(row: MessagePartRow): MessagePartRecord {
 // ── ConversationStore ─────────────────────────────────────────────────────────
 
 export class ConversationStore {
-  private readonly fts5Available: boolean;
+  private readonly fullTextAvailable: boolean;
   private readonly backend: 'sqlite' | 'postgres';
 
   constructor(
     private db: DbClient,
-    options?: { fts5Available?: boolean; backend?: 'sqlite' | 'postgres' },
+    options?: { fullTextAvailable?: boolean; backend?: 'sqlite' | 'postgres' },
   ) {
-    this.fts5Available = options?.fts5Available ?? true;
+    this.fullTextAvailable = options?.fullTextAvailable ?? true;
     this.backend = options?.backend ?? 'sqlite';
   }
 
@@ -621,38 +621,40 @@ export class ConversationStore {
       return 0;
     }
 
-    let deleted = 0;
-    for (const messageId of messageIds) {
-      // Skip if referenced by a summary (ON DELETE RESTRICT would fail anyway)
-      const refSql = this.backend === 'postgres'
-        ? `SELECT 1 AS found FROM summary_messages WHERE message_id = $1 LIMIT 1`
-        : `SELECT 1 AS found FROM summary_messages WHERE message_id = ? LIMIT 1`;
-      
-      const refRow = await this.db.queryOne<{ found: number }>(refSql, [messageId]);
-      if (refRow) {
-        continue;
+    return this.db.transaction(async () => {
+      let deleted = 0;
+      for (const messageId of messageIds) {
+        // Skip if referenced by a summary (ON DELETE RESTRICT would fail anyway)
+        const refSql = this.backend === 'postgres'
+          ? `SELECT 1 AS found FROM summary_messages WHERE message_id = $1 LIMIT 1`
+          : `SELECT 1 AS found FROM summary_messages WHERE message_id = ? LIMIT 1`;
+        
+        const refRow = await this.db.queryOne<{ found: number }>(refSql, [messageId]);
+        if (refRow) {
+          continue;
+        }
+
+        // Remove from context_items first (RESTRICT constraint)
+        const deleteContextSql = this.backend === 'postgres'
+          ? `DELETE FROM context_items WHERE item_type = 'message' AND message_id = $1`
+          : `DELETE FROM context_items WHERE item_type = 'message' AND message_id = ?`;
+        
+        await this.db.run(deleteContextSql, [messageId]);
+
+        await this.deleteMessageFromFullText(messageId);
+
+        // Delete the message (message_parts cascade via ON DELETE CASCADE)
+        const deleteMessageSql = this.backend === 'postgres'
+          ? `DELETE FROM messages WHERE message_id = $1`
+          : `DELETE FROM messages WHERE message_id = ?`;
+        
+        await this.db.run(deleteMessageSql, [messageId]);
+
+        deleted += 1;
       }
 
-      // Remove from context_items first (RESTRICT constraint)
-      const deleteContextSql = this.backend === 'postgres'
-        ? `DELETE FROM context_items WHERE item_type = 'message' AND message_id = $1`
-        : `DELETE FROM context_items WHERE item_type = 'message' AND message_id = ?`;
-      
-      await this.db.run(deleteContextSql, [messageId]);
-
-      await this.deleteMessageFromFullText(messageId);
-
-      // Delete the message (message_parts cascade via ON DELETE CASCADE)
-      const deleteMessageSql = this.backend === 'postgres'
-        ? `DELETE FROM messages WHERE message_id = $1`
-        : `DELETE FROM messages WHERE message_id = ?`;
-      
-      await this.db.run(deleteMessageSql, [messageId]);
-
-      deleted += 1;
-    }
-
-    return deleted;
+      return deleted;
+    });
   }
 
   // ── Search ────────────────────────────────────────────────────────────────
@@ -661,7 +663,7 @@ export class ConversationStore {
     const limit = input.limit ?? 50;
 
     if (input.mode === "full_text") {
-      if (this.fts5Available) {
+      if (this.fullTextAvailable) {
         try {
           return await this.searchFullText(
             input.query,
@@ -686,7 +688,7 @@ export class ConversationStore {
   }
 
   private async indexMessageForFullText(messageId: MessageId, content: string): Promise<void> {
-    if (!this.fts5Available) {
+    if (!this.fullTextAvailable) {
       return;
     }
     try {
@@ -703,7 +705,7 @@ export class ConversationStore {
   }
 
   private async deleteMessageFromFullText(messageId: MessageId): Promise<void> {
-    if (!this.fts5Available) {
+    if (!this.fullTextAvailable) {
       return;
     }
     try {
@@ -748,11 +750,11 @@ export class ConversationStore {
       args.push(conversationId);
     }
     if (since) {
-      where.push("julianday(m.created_at) >= julianday(?)");
+      where.push("m.created_at >= ?");
       args.push(since.toISOString());
     }
     if (before) {
-      where.push("julianday(m.created_at) < julianday(?)");
+      where.push("m.created_at < ?");
       args.push(before.toISOString());
     }
     args.push(limit);
@@ -832,53 +834,35 @@ export class ConversationStore {
 
     let where: string[] = [...plan.where];
     let args: Array<string | number> = [...plan.args];
-    let paramIndex = args.length + 1;
+    let paramCounter = args.length + 1;
 
     if (this.backend === 'postgres') {
       // Convert ? placeholders to $n for PostgreSQL
-      where = plan.where.map((clause, index) => {
-        let converted = clause;
-        for (let i = 0; i < args.length; i++) {
-          converted = converted.replace('?', `$${i + 1}`);
-        }
-        return converted;
+      where = plan.where.map((clause) => {
+        return clause.replace(/\?/g, () => `${paramCounter++}`);
       });
-
-      if (conversationId != null) {
-        where.push(`conversation_id = $${paramIndex}`);
-        args.push(conversationId);
-        paramIndex++;
-      }
-      if (since) {
-        where.push(`created_at >= $${paramIndex}`);
-        args.push(since.toISOString());
-        paramIndex++;
-      }
-      if (before) {
-        where.push(`created_at < $${paramIndex}`);
-        args.push(before.toISOString());
-        paramIndex++;
-      }
-      args.push(limit);
-    } else {
-      // SQLite
-      if (conversationId != null) {
-        where.push("conversation_id = ?");
-        args.push(conversationId);
-      }
-      if (since) {
-        where.push("julianday(created_at) >= julianday(?)");
-        args.push(since.toISOString());
-      }
-      if (before) {
-        where.push("julianday(created_at) < julianday(?)");
-        args.push(before.toISOString());
-      }
-      args.push(limit);
     }
 
+    if (conversationId != null) {
+      where.push(this.backend === 'postgres' ? `conversation_id = $${paramCounter}` : 'conversation_id = ?');
+      args.push(conversationId);
+      paramCounter++;
+    }
+    if (since) {
+      where.push(this.backend === 'postgres' ? `created_at >= $${paramCounter}` : 'created_at >= ?');
+      args.push(since.toISOString());
+      paramCounter++;
+    }
+    if (before) {
+      where.push(this.backend === 'postgres' ? `created_at < $${paramCounter}` : 'created_at < ?');
+      args.push(before.toISOString());
+      paramCounter++;
+    }
+    args.push(limit);
+
     const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
-    const limitClause = this.backend === 'postgres' ? `LIMIT $${args.length}` : 'LIMIT ?';
+    const limitPlaceholder = this.backend === 'postgres' ? `${paramCounter}` : '?';
+    const limitClause = `LIMIT ${limitPlaceholder}`;
     
     const sql = `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
                  FROM messages
@@ -929,11 +913,11 @@ export class ConversationStore {
       args.push(conversationId);
     }
     if (since) {
-      where.push("julianday(created_at) >= julianday(?)");
+      where.push("created_at >= ?");
       args.push(since.toISOString());
     }
     if (before) {
-      where.push("julianday(created_at) < julianday(?)");
+      where.push("created_at < ?");
       args.push(before.toISOString());
     }
     const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";

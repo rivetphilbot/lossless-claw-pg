@@ -3,7 +3,7 @@ import type { DbClient } from "./db-interface.js";
 import type { LcmConfig } from "./config.js";
 
 export type LcmDbFeatures = {
-  fts5Available: boolean;
+  fullTextAvailable: boolean;
   backend: 'sqlite' | 'postgres';
 };
 
@@ -35,7 +35,7 @@ export function getLcmDbFeatures(config: LcmConfig, dbOrClient?: DatabaseSync | 
   if (config.backend === 'postgres') {
     // PostgreSQL has built-in full-text search with tsvector
     return {
-      fts5Available: true, // We map FTS5 concept to tsvector availability
+      fullTextAvailable: true, // We map FTS5 concept to tsvector availability
       backend: 'postgres'
     };
   }
@@ -49,7 +49,7 @@ export function getLcmDbFeatures(config: LcmConfig, dbOrClient?: DatabaseSync | 
     }
 
     const detected: LcmDbFeatures = {
-      fts5Available: probeFts5(db),
+      fullTextAvailable: probeFts5(db),
       backend: 'sqlite'
     };
     featureCache.set(db, detected);
@@ -58,7 +58,7 @@ export function getLcmDbFeatures(config: LcmConfig, dbOrClient?: DatabaseSync | 
 
   // Fallback for SQLite when no database handle available
   return {
-    fts5Available: false,
+    fullTextAvailable: false,
     backend: 'sqlite'
   };
 }
@@ -73,7 +73,7 @@ export function getLcmDbFeaturesLegacy(db: DatabaseSync): LcmDbFeatures {
   }
 
   const detected: LcmDbFeatures = {
-    fts5Available: probeFts5(db),
+    fullTextAvailable: probeFts5(db),
     backend: 'sqlite'
   };
   featureCache.set(db, detected);

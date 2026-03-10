@@ -357,7 +357,7 @@ function backfillSummaryMetadata(db: DatabaseSync): void {
 
 export function runLcmMigrations(
   db: DatabaseSync,
-  options?: { fts5Available?: boolean },
+  options?: { fullTextAvailable?: boolean },
 ): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS conversations (
@@ -496,8 +496,8 @@ export function runLcmMigrations(
   backfillSummaryDepths(db);
   backfillSummaryMetadata(db);
 
-  const fts5Available = options?.fts5Available ?? getLcmDbFeaturesLegacy(db).fts5Available;
-  if (!fts5Available) {
+  const fullTextAvailable = options?.fullTextAvailable ?? getLcmDbFeaturesLegacy(db).fullTextAvailable;
+  if (!fullTextAvailable) {
     return;
   }
 
