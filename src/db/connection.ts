@@ -49,11 +49,14 @@ async function forceCloseConnection(entry: ConnectionEntry): Promise<void> {
 }
 
 export function createLcmConnection(config: LcmConfig): DbClient {
-  if (config.backend === 'postgres' && config.connectionString) {
+  if (config.backend === 'postgres') {
+    if (!config.connectionString) {
+      throw new Error("LCM backend is 'postgres' but connectionString is missing.");
+    }
     return createPostgresConnection(config.connectionString);
-  } else {
-    return createSqliteConnection(config.databasePath);
   }
+  // backend === 'sqlite'
+  return createSqliteConnection(config.databasePath);
 }
 
 function createSqliteConnection(dbPath: string): DbClient {
@@ -118,11 +121,14 @@ export async function closeLcmConnection(key?: string): Promise<void> {
   _connections.clear();
 }
 
-// Legacy function for backward compatibility
+/**
+ * Legacy function — returns raw SQLite DatabaseSync for migration code.
+ * Only works when backend is sqlite. Throws for postgres.
+ */
 export function getLcmConnection(dbPath: string): DatabaseSync {
   const client = createSqliteConnection(dbPath);
   if (client instanceof SqliteClient) {
     return client.getUnderlyingDatabase();
   }
-  throw new Error("Legacy getLcmConnection only supports SQLite");
+  throw new Error("getLcmConnection only works with SQLite backend");
 }

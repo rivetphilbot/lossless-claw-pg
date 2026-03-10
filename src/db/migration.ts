@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
-import { getLcmDbFeaturesLegacy } from "./features.js";
+import { getLcmDbFeatures } from "./features.js";
+import type { LcmConfig } from "./config.js";
 
 type SummaryColumnInfo = {
   name?: string;
@@ -496,7 +497,9 @@ export function runLcmMigrations(
   backfillSummaryDepths(db);
   backfillSummaryMetadata(db);
 
-  const fullTextAvailable = options?.fullTextAvailable ?? getLcmDbFeaturesLegacy(db).fullTextAvailable;
+  const fullTextAvailable = options?.fullTextAvailable ?? getLcmDbFeatures(
+    { backend: 'sqlite' } as LcmConfig, db
+  ).fullTextAvailable;
   if (!fullTextAvailable) {
     return;
   }

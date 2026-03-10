@@ -26,56 +26,26 @@ function probeFts5(db: DatabaseSync): boolean {
 }
 
 /**
- * Detect database features based on the backend type and configuration.
+ * Detect database features for the configured backend.
  *
- * For SQLite: probe for FTS5 availability (runtime-specific)
- * For PostgreSQL: tsvector is always available (built-in)
+ * PostgreSQL: tsvector always available (built-in).
+ * SQLite: probe for FTS5 at runtime.
  */
 export function getLcmDbFeatures(config: LcmConfig, dbOrClient?: DatabaseSync | DbClient): LcmDbFeatures {
   if (config.backend === 'postgres') {
-    // PostgreSQL has built-in full-text search with tsvector
-    return {
-      fullTextAvailable: true, // We map FTS5 concept to tsvector availability
-      backend: 'postgres'
-    };
+    return { fullTextAvailable: true, backend: 'postgres' };
   }
 
-  // SQLite backend - probe for FTS5 if we have a DatabaseSync handle
+  // SQLite — probe for FTS5 if we have a handle
   if (dbOrClient && 'prepare' in dbOrClient) {
     const db = dbOrClient as DatabaseSync;
     const cached = featureCache.get(db);
-    if (cached) {
-      return cached;
-    }
+    if (cached) return cached;
 
-    const detected: LcmDbFeatures = {
-      fullTextAvailable: probeFts5(db),
-      backend: 'sqlite'
-    };
+    const detected: LcmDbFeatures = { fullTextAvailable: probeFts5(db), backend: 'sqlite' };
     featureCache.set(db, detected);
     return detected;
   }
 
-  // Fallback for SQLite when no database handle available
-  return {
-    fullTextAvailable: false,
-    backend: 'sqlite'
-  };
-}
-
-/**
- * Legacy function for backward compatibility with existing SQLite code
- */
-export function getLcmDbFeaturesLegacy(db: DatabaseSync): LcmDbFeatures {
-  const cached = featureCache.get(db);
-  if (cached) {
-    return cached;
-  }
-
-  const detected: LcmDbFeatures = {
-    fullTextAvailable: probeFts5(db),
-    backend: 'sqlite'
-  };
-  featureCache.set(db, detected);
-  return detected;
+  return { fullTextAvailable: false, backend: 'sqlite' };
 }
