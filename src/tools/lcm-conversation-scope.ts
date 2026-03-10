@@ -51,10 +51,7 @@ export async function resolveLcmConversationScope(input: {
     typeof params.conversationId === "number" && Number.isFinite(params.conversationId)
       ? Math.trunc(params.conversationId)
       : undefined;
-  if (explicitConversationId != null) {
-    return { conversationId: explicitConversationId, allConversations: false };
-  }
-
+  // allConversations defaults to true — always search everything unless explicitly disabled
   if (params.allConversations !== false) {
     return { conversationId: undefined, allConversations: true };
   }
