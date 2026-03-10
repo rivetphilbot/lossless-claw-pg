@@ -887,7 +887,7 @@ export class SummaryStore {
     since?: Date,
     before?: Date,
   ): Promise<SummarySearchResult[]> {
-    const where: string[] = ["content_tsvector @@ plainto_tsquery('english', $1)"];
+    const where: string[] = ["content_tsv @@ plainto_tsquery('english', $1)"];
     const args: Array<string | number> = [sanitizeTsQuery(query)];
     let paramIndex = 2;
 
@@ -912,7 +912,7 @@ export class SummaryStore {
          conversation_id,
          kind,
          ts_headline('english', content, plainto_tsquery('english', $1), 'MaxWords=32') AS snippet,
-         ts_rank(content_tsvector, plainto_tsquery('english', $1)) AS rank,
+         ts_rank(content_tsv, plainto_tsquery('english', $1)) AS rank,
          created_at
        FROM summaries
        WHERE ${where.join(" AND ")}
@@ -943,7 +943,7 @@ export class SummaryStore {
     if (this.backend === 'postgres') {
       // Convert ? placeholders to $n for PostgreSQL
       where = plan.where.map((clause) => {
-        return clause.replace(/\?/g, () => `${paramCounter++}`);
+        return clause.replace(/\?/g, () => `$${paramCounter++}`).replace(/ESCAPE '\\\\'/g, "ESCAPE '\\'");
       });
 
       if (conversationId != null) {

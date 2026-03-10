@@ -1,4 +1,3 @@
-import type { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import type { DbClient } from "../db/db-interface.js";
 import { sanitizeFts5Query } from "./fts5-sanitize.js";
@@ -783,7 +782,7 @@ export class ConversationStore {
     since?: Date,
     before?: Date,
   ): Promise<MessageSearchResult[]> {
-    const where: string[] = ["content_tsvector @@ plainto_tsquery('english', $1)"];
+    const where: string[] = ["content_tsv @@ plainto_tsquery('english', $1)"];
     const args: Array<string | number> = [sanitizeTsQuery(query)];
     let paramIndex = 2;
 
@@ -808,7 +807,7 @@ export class ConversationStore {
          conversation_id,
          role,
          ts_headline('english', content, plainto_tsquery('english', $1), 'MaxWords=32') AS snippet,
-         ts_rank(content_tsvector, plainto_tsquery('english', $1)) AS rank,
+         ts_rank(content_tsv, plainto_tsquery('english', $1)) AS rank,
          created_at
        FROM messages
        WHERE ${where.join(" AND ")}
@@ -839,7 +838,7 @@ export class ConversationStore {
     if (this.backend === 'postgres') {
       // Convert ? placeholders to $n for PostgreSQL
       where = plan.where.map((clause) => {
-        return clause.replace(/\?/g, () => `${paramCounter++}`);
+        return clause.replace(/\?/g, () => `$${paramCounter++}`).replace(/ESCAPE '\\\\'/g, "ESCAPE '\\'");
       });
     }
 

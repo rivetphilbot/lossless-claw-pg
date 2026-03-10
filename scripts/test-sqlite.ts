@@ -2,19 +2,18 @@
 
 import { createLcmConnection } from "../src/db/connection.js";
 import type { LcmConfig } from "../src/db/config.js";
+import { runLcmMigrations } from "../src/db/migration.js";
+import { SqliteClient } from "../src/db/sqlite-client.js";
 import { ConversationStore } from "../src/store/conversation-store.js";
 import { SummaryStore } from "../src/store/summary-store.js";
 
-const POSTGRES_CONNECTION_STRING = "postgres://lcm_phil:pheon.lcm4@10.4.20.16:5432/phil_memory";
-
-async function testPostgres() {
-  console.log("Testing PostgreSQL backend...");
+async function testSqlite() {
+  console.log("Testing SQLite backend...");
 
   const config: LcmConfig = {
     enabled: true,
-    databasePath: "",
-    connectionString: POSTGRES_CONNECTION_STRING,
-    backend: "postgres",
+    databasePath: ":memory:",
+    backend: "sqlite",
     contextThreshold: 0.75,
     freshTailCount: 32,
     leafMinFanout: 8,
@@ -34,8 +33,11 @@ async function testPostgres() {
   };
 
   const db = createLcmConnection(config);
-  const convStore = new ConversationStore(db, { fullTextAvailable: true, backend: "postgres" });
-  const summStore = new SummaryStore(db, { fullTextAvailable: true, backend: "postgres" });
+  if (db instanceof SqliteClient) {
+    runLcmMigrations(db.getUnderlyingDatabase(), { fullTextAvailable: true });
+  }
+  const convStore = new ConversationStore(db, { fullTextAvailable: true, backend: "sqlite" });
+  const summStore = new SummaryStore(db, { fullTextAvailable: true, backend: "sqlite" });
 
   let passed = 0;
   let failed = 0;
@@ -181,7 +183,7 @@ async function testPostgres() {
   }
 }
 
-testPostgres().catch((error) => {
+testSqlite().catch((error) => {
   console.error("Test failed:", error);
   process.exit(1);
 });
