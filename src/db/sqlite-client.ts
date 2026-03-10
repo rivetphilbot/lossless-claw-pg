@@ -19,11 +19,15 @@ export class SqliteClient implements DbClient {
 
   async run(sql: string, params: unknown[] = []): Promise<RunResult> {
     const result = this.db.prepare(sql).run(...params.map(p => p as any));
+    const lastId = result.lastInsertRowid;
+    let insertId: number | undefined;
+    if (lastId != null) {
+      // @ts-ignore
+      insertId = Number(lastId);
+    }
     return {
       rowCount: result.changes,
-      lastInsertId: typeof result.lastInsertRowid === "bigint" 
-        ? Number(result.lastInsertRowid) 
-        : (result.lastInsertRowid as number | undefined)
+      lastInsertId: insertId
     };
   }
 

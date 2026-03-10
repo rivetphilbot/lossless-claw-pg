@@ -849,13 +849,13 @@ function createLcmDependencies(api: OpenClawPluginApi): LcmDependencies {
       ).trim();
       return { provider, model: raw };
     },
-    getApiKey: (provider) => resolveApiKey(provider, readEnv),
-    requireApiKey: (provider) => {
+    getApiKey: async (provider) => Promise.resolve(resolveApiKey(provider, readEnv)),
+    requireApiKey: async (provider) => {
       const key = resolveApiKey(provider, readEnv);
       if (!key) {
         throw new Error(`Missing API key for provider '${provider}'.`);
       }
-      return key;
+      return Promise.resolve(key);
     },
     parseAgentSessionKey,
     isSubagentSessionKey: (sessionKey) => {

@@ -435,16 +435,19 @@ export class ConversationStore {
   }
 
   async getLastMessage(conversationId: ConversationId): Promise<MessageRecord | null> {
-    const row = this.db
-      .prepare(
-        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
-       FROM messages
-       WHERE conversation_id = ?
-       ORDER BY seq DESC
-       LIMIT 1`,
-      )
-      .get(conversationId) as unknown as MessageRow | undefined;
+    const sql = this.backend === 'postgres'
+      ? `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+         FROM messages
+         WHERE conversation_id = $1
+         ORDER BY seq DESC
+         LIMIT 1`
+      : `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+         FROM messages
+         WHERE conversation_id = ?
+         ORDER BY seq DESC
+         LIMIT 1`;
 
+    const row = await this.db.queryOne<MessageRow>(sql, [conversationId]);
     return row ? toMessageRecord(row) : null;
   }
 
@@ -453,15 +456,17 @@ export class ConversationStore {
     role: MessageRole,
     content: string,
   ): Promise<boolean> {
-    const row = this.db
-      .prepare(
-        `SELECT 1 AS count
-       FROM messages
-       WHERE conversation_id = ? AND role = ? AND content = ?
-       LIMIT 1`,
-      )
-      .get(conversationId, role, content) as unknown as CountRow | undefined;
+    const sql = this.backend === 'postgres'
+      ? `SELECT 1 AS count
+         FROM messages
+         WHERE conversation_id = $1 AND role = $2 AND content = $3
+         LIMIT 1`
+      : `SELECT 1 AS count
+         FROM messages
+         WHERE conversation_id = ? AND role = ? AND content = ?
+         LIMIT 1`;
 
+    const row = await this.db.queryOne<CountRow>(sql, [conversationId, role, content]);
     return row?.count === 1;
   }
 
@@ -470,24 +475,26 @@ export class ConversationStore {
     role: MessageRole,
     content: string,
   ): Promise<number> {
-    const row = this.db
-      .prepare(
-        `SELECT COUNT(*) AS count
-       FROM messages
-       WHERE conversation_id = ? AND role = ? AND content = ?`,
-      )
-      .get(conversationId, role, content) as unknown as CountRow | undefined;
+    const sql = this.backend === 'postgres'
+      ? `SELECT COUNT(*) AS count
+         FROM messages
+         WHERE conversation_id = $1 AND role = $2 AND content = $3`
+      : `SELECT COUNT(*) AS count
+         FROM messages
+         WHERE conversation_id = ? AND role = ? AND content = ?`;
 
+    const row = await this.db.queryOne<CountRow>(sql, [conversationId, role, content]);
     return row?.count ?? 0;
   }
 
   async getMessageById(messageId: MessageId): Promise<MessageRecord | null> {
-    const row = this.db
-      .prepare(
-        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
-       FROM messages WHERE message_id = ?`,
-      )
-      .get(messageId) as unknown as MessageRow | undefined;
+    const sql = this.backend === 'postgres'
+      ? `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+         FROM messages WHERE message_id = $1`
+      : `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+         FROM messages WHERE message_id = ?`;
+
+    const row = await this.db.queryOne<MessageRow>(sql, [messageId]);
     return row ? toMessageRecord(row) : null;
   }
 
@@ -496,24 +503,39 @@ export class ConversationStore {
       return;
     }
 
-    const stmt = this.db.prepare(
-      `INSERT INTO message_parts (
-         part_id,
-         message_id,
-         session_id,
-         part_type,
-         ordinal,
-         text_content,
-         tool_call_id,
-         tool_name,
-         tool_input,
-         tool_output,
-         metadata
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    );
-
     for (const part of parts) {
-      stmt.run(
+      let sql: string;
+      if (this.backend === 'postgres') {
+        sql = `INSERT INTO message_parts (
+                 part_id,
+                 message_id,
+                 session_id,
+                 part_type,
+                 ordinal,
+                 text_content,
+                 tool_call_id,
+                 tool_name,
+                 tool_input,
+                 tool_output,
+                 metadata
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`;
+      } else {
+        sql = `INSERT INTO message_parts (
+                 part_id,
+                 message_id,
+                 session_id,
+                 part_type,
+                 ordinal,
+                 text_content,
+                 tool_call_id,
+                 tool_name,
+                 tool_input,
+                 tool_output,
+                 metadata
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+      }
+
+      await this.db.run(sql, [
         randomUUID(),
         messageId,
         part.sessionId,
@@ -525,14 +547,28 @@ export class ConversationStore {
         part.toolInput ?? null,
         part.toolOutput ?? null,
         part.metadata ?? null,
-      );
+      ]);
     }
   }
 
   async getMessageParts(messageId: MessageId): Promise<MessagePartRecord[]> {
-    const rows = this.db
-      .prepare(
-        `SELECT
+    const sql = this.backend === 'postgres'
+      ? `SELECT
+         part_id,
+         message_id,
+         session_id,
+         part_type,
+         ordinal,
+         text_content,
+         tool_call_id,
+         tool_name,
+         tool_input,
+         tool_output,
+         metadata
+       FROM message_parts
+       WHERE message_id = $1
+       ORDER BY ordinal`
+      : `SELECT
          part_id,
          message_id,
          session_id,
@@ -546,27 +582,29 @@ export class ConversationStore {
          metadata
        FROM message_parts
        WHERE message_id = ?
-       ORDER BY ordinal`,
-      )
-      .all(messageId) as unknown as MessagePartRow[];
+       ORDER BY ordinal`;
 
-    return rows.map(toMessagePartRecord);
+    const result = await this.db.query<MessagePartRow>(sql, [messageId]);
+    return result.rows.map(toMessagePartRecord);
   }
 
   async getMessageCount(conversationId: ConversationId): Promise<number> {
-    const row = this.db
-      .prepare(`SELECT COUNT(*) AS count FROM messages WHERE conversation_id = ?`)
-      .get(conversationId) as unknown as CountRow;
+    const sql = this.backend === 'postgres'
+      ? `SELECT COUNT(*) AS count FROM messages WHERE conversation_id = $1`
+      : `SELECT COUNT(*) AS count FROM messages WHERE conversation_id = ?`;
+
+    const row = await this.db.queryOne<CountRow>(sql, [conversationId]);
     return row?.count ?? 0;
   }
 
   async getMaxSeq(conversationId: ConversationId): Promise<number> {
-    const row = this.db
-      .prepare(
-        `SELECT COALESCE(MAX(seq), 0) AS max_seq
-       FROM messages WHERE conversation_id = ?`,
-      )
-      .get(conversationId) as unknown as MaxSeqRow;
+    const sql = this.backend === 'postgres'
+      ? `SELECT COALESCE(MAX(seq), 0) AS max_seq
+         FROM messages WHERE conversation_id = $1`
+      : `SELECT COALESCE(MAX(seq), 0) AS max_seq
+         FROM messages WHERE conversation_id = ?`;
+
+    const row = await this.db.queryOne<MaxSeqRow>(sql, [conversationId]);
     return row?.max_seq ?? 0;
   }
 
@@ -586,22 +624,30 @@ export class ConversationStore {
     let deleted = 0;
     for (const messageId of messageIds) {
       // Skip if referenced by a summary (ON DELETE RESTRICT would fail anyway)
-      const refRow = this.db
-        .prepare(`SELECT 1 AS found FROM summary_messages WHERE message_id = ? LIMIT 1`)
-        .get(messageId) as unknown as { found: number } | undefined;
+      const refSql = this.backend === 'postgres'
+        ? `SELECT 1 AS found FROM summary_messages WHERE message_id = $1 LIMIT 1`
+        : `SELECT 1 AS found FROM summary_messages WHERE message_id = ? LIMIT 1`;
+      
+      const refRow = await this.db.queryOne<{ found: number }>(refSql, [messageId]);
       if (refRow) {
         continue;
       }
 
       // Remove from context_items first (RESTRICT constraint)
-      this.db
-        .prepare(`DELETE FROM context_items WHERE item_type = 'message' AND message_id = ?`)
-        .run(messageId);
+      const deleteContextSql = this.backend === 'postgres'
+        ? `DELETE FROM context_items WHERE item_type = 'message' AND message_id = $1`
+        : `DELETE FROM context_items WHERE item_type = 'message' AND message_id = ?`;
+      
+      await this.db.run(deleteContextSql, [messageId]);
 
-      this.deleteMessageFromFullText(messageId);
+      await this.deleteMessageFromFullText(messageId);
 
       // Delete the message (message_parts cascade via ON DELETE CASCADE)
-      this.db.prepare(`DELETE FROM messages WHERE message_id = ?`).run(messageId);
+      const deleteMessageSql = this.backend === 'postgres'
+        ? `DELETE FROM messages WHERE message_id = $1`
+        : `DELETE FROM messages WHERE message_id = ?`;
+      
+      await this.db.run(deleteMessageSql, [messageId]);
 
       deleted += 1;
     }

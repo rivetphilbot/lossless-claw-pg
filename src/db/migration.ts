@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import { getLcmDbFeatures } from "./features.js";
+import { getLcmDbFeaturesLegacy } from "./features.js";
 
 type SummaryColumnInfo = {
   name?: string;
@@ -496,7 +496,7 @@ export function runLcmMigrations(
   backfillSummaryDepths(db);
   backfillSummaryMetadata(db);
 
-  const fts5Available = options?.fts5Available ?? getLcmDbFeatures(db).fts5Available;
+  const fts5Available = options?.fts5Available ?? getLcmDbFeaturesLegacy(db).fts5Available;
   if (!fts5Available) {
     return;
   }
