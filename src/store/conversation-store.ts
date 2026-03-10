@@ -782,7 +782,7 @@ export class ConversationStore {
     since?: Date,
     before?: Date,
   ): Promise<MessageSearchResult[]> {
-    const where: string[] = ["content_tsv @@ plainto_tsquery('english', $1)"];
+    const where: string[] = ["content_tsv @@ websearch_to_tsquery('english', $1)"];
     const args: Array<string | number> = [sanitizeTsQuery(query)];
     let paramIndex = 2;
 
@@ -806,8 +806,8 @@ export class ConversationStore {
          message_id,
          conversation_id,
          role,
-         ts_headline('english', content, plainto_tsquery('english', $1), 'MaxWords=32') AS snippet,
-         ts_rank(content_tsv, plainto_tsquery('english', $1)) AS rank,
+         ts_headline('english', content, websearch_to_tsquery('english', $1), 'MaxWords=32') AS snippet,
+         ts_rank(content_tsv, websearch_to_tsquery('english', $1)) AS rank,
          created_at
        FROM messages
        WHERE ${where.join(" AND ")}
