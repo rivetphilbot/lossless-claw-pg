@@ -1,0 +1,63 @@
+{
+  "name": "lossless-claw-pg",
+  "version": "0.2.7",
+  "description": "PostgreSQL adapter for Lossless Context Management (LCM) - fork of @martian-engineering/lossless-claw with dual SQLite/PostgreSQL backend support",
+  "type": "module",
+  "main": "index.ts",
+  "license": "MIT",
+  "author": "Philip Tompkins <philbert440@gmail.com>",
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "context-management",
+    "llm",
+    "summarization",
+    "conversation-memory",
+    "dag"
+  ],
+  "files": [
+    "index.ts",
+    "src/**/*.ts",
+    "openclaw.plugin.json",
+    "docs/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "vitest run --dir test"
+  },
+  "dependencies": {
+    "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-ai": "*",
+    "@sinclair/typebox": "0.34.48",
+    "@types/pg": "^8.18.0",
+    "pg": "^8.20.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/philbert440/lossless-claw-pg.git"
+  },
+  "homepage": "https://github.com/philbert440/lossless-claw-pg#readme",
+  "bugs": {
+    "url": "https://github.com/philbert440/lossless-claw-pg/issues"
+  },
+  "contributors": [
+    {
+      "name": "Josh Lehman",
+      "email": "josh@martian.engineering",
+      "url": "https://github.com/Martian-Engineering"
+    }
+  ]
+}
