@@ -29,6 +29,12 @@ export type LcmConfig = {
   timezone: string;
   /** When true, retroactively delete HEARTBEAT_OK turn cycles from LCM storage. */
   pruneHeartbeatOk: boolean;
+  /** API key for OpenAI embedding generation. Falls back to OPENAI_API_KEY env var. */
+  embeddingApiKey: string;
+  /** Base URL for embedding API. Defaults to OpenAI. */
+  embeddingBaseUrl: string;
+  /** Embedding model name. Defaults to text-embedding-3-small. */
+  embeddingModel: string;
 };
 
 /** Safely coerce an unknown value to a finite number, or return undefined. */
@@ -167,5 +173,11 @@ export function resolveLcmConfig(
       env.LCM_PRUNE_HEARTBEAT_OK !== undefined
         ? env.LCM_PRUNE_HEARTBEAT_OK === "true"
         : toBool(pc.pruneHeartbeatOk) ?? false,
+    embeddingApiKey:
+      env.LCM_EMBEDDING_API_KEY ?? env.OPENAI_API_KEY ?? toStr(pc.embeddingApiKey) ?? "",
+    embeddingBaseUrl:
+      env.LCM_EMBEDDING_BASE_URL ?? toStr(pc.embeddingBaseUrl) ?? "https://api.openai.com/v1",
+    embeddingModel:
+      env.LCM_EMBEDDING_MODEL ?? toStr(pc.embeddingModel) ?? "text-embedding-3-small",
   };
 }

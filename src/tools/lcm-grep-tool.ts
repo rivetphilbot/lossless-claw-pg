@@ -10,13 +10,13 @@ const MAX_RESULT_CHARS = 40_000; // ~10k tokens
 const LcmGrepSchema = Type.Object({
   pattern: Type.String({
     description:
-      "Search pattern. Interpreted as regex when mode is 'regex', or as a text query for 'full_text' mode.",
+      "Search pattern. Interpreted as regex when mode is 'regex', as a text query for 'full_text' mode, or as a natural language query for 'semantic' mode.",
   }),
   mode: Type.Optional(
     Type.String({
       description:
-        'Search mode: "regex" for regular expression matching, "full_text" for text search. Default: "regex".',
-      enum: ["regex", "full_text"],
+        'Search mode: "regex" for regular expression matching, "full_text" for text search, "semantic" for embedding-based similarity search. Default: "regex".',
+      enum: ["regex", "full_text", "semantic"],
     }),
   ),
   scope: Type.Optional(
@@ -75,18 +75,19 @@ export function createLcmGrepTool(input: {
     name: "lcm_grep",
     label: "LCM Grep",
     description:
-      "Search compacted conversation history using regex or full-text search. " +
+      "Search compacted conversation history using regex, full-text, or semantic search. " +
       "Searches across messages and/or summaries stored by LCM. " +
       "Use this to find specific content that may have been compacted away from " +
       "active context. Returns matching snippets with their summary/message IDs " +
-      "for follow-up with lcm_expand or lcm_describe.",
+      "for follow-up with lcm_expand or lcm_describe. " +
+      'Use mode="semantic" for natural language similarity search (requires embeddings).',
     parameters: LcmGrepSchema,
     async execute(_toolCallId, params) {
       const retrieval = input.lcm.getRetrieval();
 
       const p = params as Record<string, unknown>;
       const pattern = (p.pattern as string).trim();
-      const mode = (p.mode as "regex" | "full_text") ?? "regex";
+      const mode = (p.mode as "regex" | "full_text" | "semantic") ?? "regex";
       const scope = (p.scope as "messages" | "summaries" | "both") ?? "both";
       const limit = typeof p.limit === "number" ? Math.trunc(p.limit) : 50;
       let since: Date | undefined;

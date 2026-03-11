@@ -3,6 +3,7 @@ import type { DbClient } from "../db/db-interface.js";
 import { sanitizeFts5Query } from "./fts5-sanitize.js";
 import { sanitizeTsQuery } from "./tsquery-sanitize.js";
 import { buildLikeSearchPlan, createFallbackSnippet } from "./full-text-fallback.js";
+import { EmbeddingClient, toVectorLiteral, type EmbeddingConfig } from "../embeddings.js";
 
 export type ConversationId = number;
 export type MessageId = number;
@@ -83,7 +84,7 @@ export type ConversationRecord = {
 export type MessageSearchInput = {
   conversationId?: ConversationId;
   query: string;
-  mode: "regex" | "full_text";
+  mode: "regex" | "full_text" | "semantic";
   since?: Date;
   before?: Date;
   limit?: number;
@@ -207,13 +208,22 @@ function toMessagePartRecord(row: MessagePartRow): MessagePartRecord {
 export class ConversationStore {
   private readonly fullTextAvailable: boolean;
   private readonly backend: 'sqlite' | 'postgres';
+  private readonly embeddingClient: EmbeddingClient | null;
 
   constructor(
     private db: DbClient,
-    options?: { fullTextAvailable?: boolean; backend?: 'sqlite' | 'postgres' },
+    options?: { fullTextAvailable?: boolean; backend?: 'sqlite' | 'postgres'; embeddingConfig?: EmbeddingConfig },
   ) {
     this.fullTextAvailable = options?.fullTextAvailable ?? true;
     this.backend = options?.backend ?? 'sqlite';
+
+    // Initialize embedding client if configured and on postgres
+    if (this.backend === 'postgres') {
+      const client = new EmbeddingClient(options?.embeddingConfig);
+      this.embeddingClient = client.isConfigured() ? client : null;
+    } else {
+      this.embeddingClient = null;
+    }
   }
 
   // ── Transaction helpers ──────────────────────────────────────────────────
@@ -331,6 +341,11 @@ export class ConversationStore {
     const messageId = result.lastInsertId!;
 
     await this.indexMessageForFullText(messageId, input.content);
+
+    // Generate and store embedding asynchronously (non-blocking)
+    this.generateAndStoreEmbedding(messageId, input.content).catch(() => {
+      // Embedding generation is best-effort; don't break message persistence
+    });
 
     const selectSql = this.backend === 'postgres'
       ? `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
@@ -660,6 +675,21 @@ export class ConversationStore {
 
   async searchMessages(input: MessageSearchInput): Promise<MessageSearchResult[]> {
     const limit = input.limit ?? 50;
+
+    if (input.mode === "semantic") {
+      try {
+        return await this.searchSemantic(
+          input.query,
+          limit,
+          input.conversationId,
+          input.since,
+          input.before,
+        );
+      } catch {
+        // Fall back to full-text if semantic fails (e.g. no embeddings yet)
+        return this.searchMessages({ ...input, mode: "full_text" });
+      }
+    }
 
     if (input.mode === "full_text") {
       if (this.fullTextAvailable) {
@@ -999,5 +1029,110 @@ export class ConversationStore {
         rank: 0,
       };
     });
+  }
+
+  // ── Embedding operations ──────────────────────────────────────────────────
+
+  /** Generate an embedding for content and store it on the message row. */
+  private async generateAndStoreEmbedding(messageId: MessageId, content: string): Promise<void> {
+    if (!this.embeddingClient || this.backend !== 'postgres') return;
+    if (!content || content.trim().length < 20) return; // Skip trivially short content
+
+    const embedding = await this.embeddingClient.embedOne(content);
+    await this.db.run(
+      `UPDATE messages SET embedding = $1 WHERE message_id = $2`,
+      [toVectorLiteral(embedding), messageId],
+    );
+  }
+
+  /**
+   * Update the embedding for a specific message. Used by backfill scripts.
+   * Accepts a pre-computed embedding vector.
+   */
+  async updateEmbedding(messageId: MessageId, embedding: number[]): Promise<void> {
+    if (this.backend !== 'postgres') return;
+    await this.db.run(
+      `UPDATE messages SET embedding = $1 WHERE message_id = $2`,
+      [toVectorLiteral(embedding), messageId],
+    );
+  }
+
+  /**
+   * Batch update embeddings. Used by backfill scripts for efficiency.
+   */
+  async updateEmbeddingsBatch(updates: Array<{ messageId: MessageId; embedding: number[] }>): Promise<void> {
+    if (this.backend !== 'postgres' || updates.length === 0) return;
+    // Use a transaction for batch updates
+    await this.db.transaction(async (tx) => {
+      for (const { messageId, embedding } of updates) {
+        await tx.run(
+          `UPDATE messages SET embedding = $1 WHERE message_id = $2`,
+          [toVectorLiteral(embedding), messageId],
+        );
+      }
+    });
+  }
+
+  /**
+   * Semantic search: embed the query, then find nearest messages via cosine distance.
+   * Only available on PostgreSQL with pgvector and a configured embedding client.
+   */
+  async searchSemantic(
+    query: string,
+    limit: number,
+    conversationId?: ConversationId,
+    since?: Date,
+    before?: Date,
+  ): Promise<MessageSearchResult[]> {
+    if (this.backend !== 'postgres' || !this.embeddingClient) {
+      // Fall back to full-text search if semantic isn't available
+      return this.searchFullText(query, limit, conversationId, since, before);
+    }
+
+    const queryEmbedding = await this.embeddingClient.embedOne(query);
+    const vectorLiteral = toVectorLiteral(queryEmbedding);
+
+    const where: string[] = ["embedding IS NOT NULL"];
+    const args: Array<string | number> = [];
+    let paramIndex = 1;
+
+    if (conversationId != null) {
+      where.push(`conversation_id = $${paramIndex}`);
+      args.push(conversationId);
+      paramIndex++;
+    }
+    if (since) {
+      where.push(`created_at >= $${paramIndex}`);
+      args.push(since.toISOString());
+      paramIndex++;
+    }
+    if (before) {
+      where.push(`created_at < $${paramIndex}`);
+      args.push(before.toISOString());
+      paramIndex++;
+    }
+
+    // Use cosine distance operator (<=>). Lower = more similar.
+    // We use a subquery approach to leverage the ivfflat/hnsw index.
+    const sql = `SELECT
+         message_id,
+         conversation_id,
+         role,
+         substring(content for 200) AS snippet,
+         1 - (embedding <=> '${vectorLiteral}'::vector) AS rank,
+         created_at
+       FROM messages
+       WHERE ${where.join(" AND ")}
+       ORDER BY embedding <=> '${vectorLiteral}'::vector
+       LIMIT $${paramIndex}`;
+
+    args.push(limit);
+    const result = await this.db.query<MessageSearchRow>(sql, args);
+    return result.rows.map(toSearchResult);
+  }
+
+  /** Check whether the embedding client is available */
+  get embeddingsAvailable(): boolean {
+    return this.embeddingClient !== null && this.backend === 'postgres';
   }
 }

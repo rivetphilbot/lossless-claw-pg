@@ -583,13 +583,19 @@ export class LcmContextEngine implements ContextEngine {
     const features = getLcmDbFeatures(this.config);
     this.fullTextAvailable = features.fullTextAvailable;
 
+    const embeddingConfig = this.config.embeddingApiKey
+      ? { apiKey: this.config.embeddingApiKey, baseUrl: this.config.embeddingBaseUrl, model: this.config.embeddingModel }
+      : undefined;
+
     this.conversationStore = new ConversationStore(db, {
       fullTextAvailable: this.fullTextAvailable,
-      backend: features.backend
+      backend: features.backend,
+      embeddingConfig,
     });
     this.summaryStore = new SummaryStore(db, {
       fullTextAvailable: this.fullTextAvailable,
-      backend: features.backend
+      backend: features.backend,
+      embeddingConfig,
     });
 
     if (!this.fullTextAvailable) {

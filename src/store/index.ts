@@ -1,4 +1,6 @@
 export { ConversationStore } from "./conversation-store.js";
+export { EmbeddingClient, toVectorLiteral, fromVectorLiteral } from "../embeddings.js";
+export type { EmbeddingConfig } from "../embeddings.js";
 export type {
   ConversationId,
   MessageId,

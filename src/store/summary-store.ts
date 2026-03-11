@@ -2,6 +2,7 @@ import type { DbClient } from "../db/db-interface.js";
 import { sanitizeFts5Query } from "./fts5-sanitize.js";
 import { sanitizeTsQuery } from "./tsquery-sanitize.js";
 import { buildLikeSearchPlan, createFallbackSnippet } from "./full-text-fallback.js";
+import { EmbeddingClient, toVectorLiteral, type EmbeddingConfig } from "../embeddings.js";
 
 export type SummaryKind = "leaf" | "condensed";
 export type ContextItemType = "message" | "summary";
@@ -56,7 +57,7 @@ export type ContextItemRecord = {
 export type SummarySearchInput = {
   conversationId?: number;
   query: string;
-  mode: "regex" | "full_text";
+  mode: "regex" | "full_text" | "semantic";
   since?: Date;
   before?: Date;
   limit?: number;
@@ -243,13 +244,21 @@ function toLargeFileRecord(row: LargeFileRow): LargeFileRecord {
 export class SummaryStore {
   private readonly fullTextAvailable: boolean;
   private readonly backend: 'sqlite' | 'postgres';
+  private readonly embeddingClient: EmbeddingClient | null;
 
   constructor(
     private db: DbClient,
-    options?: { fullTextAvailable?: boolean; backend?: 'sqlite' | 'postgres' },
+    options?: { fullTextAvailable?: boolean; backend?: 'sqlite' | 'postgres'; embeddingConfig?: EmbeddingConfig },
   ) {
     this.fullTextAvailable = options?.fullTextAvailable ?? true;
     this.backend = options?.backend ?? 'sqlite';
+
+    if (this.backend === 'postgres') {
+      const client = new EmbeddingClient(options?.embeddingConfig);
+      this.embeddingClient = client.isConfigured() ? client : null;
+    } else {
+      this.embeddingClient = null;
+    }
   }
 
   // ── Summary CRUD ──────────────────────────────────────────────────────────
@@ -361,6 +370,11 @@ export class SummaryStore {
       // FTS indexing failed — search won't find this summary but
       // compaction and assembly will still work correctly.
     }
+
+    // Generate and store embedding asynchronously (non-blocking)
+    this.generateAndStoreSummaryEmbedding(input.summaryId, input.content).catch(() => {
+      // Embedding generation is best-effort
+    });
 
     return toSummaryRecord(row);
   }
@@ -802,6 +816,21 @@ export class SummaryStore {
   async searchSummaries(input: SummarySearchInput): Promise<SummarySearchResult[]> {
     const limit = input.limit ?? 50;
 
+    if (input.mode === "semantic") {
+      try {
+        return await this.searchSemantic(
+          input.query,
+          limit,
+          input.conversationId,
+          input.since,
+          input.before,
+        );
+      } catch {
+        // Fall back to full-text if semantic fails
+        return this.searchSummaries({ ...input, mode: "full_text" });
+      }
+    }
+
     if (input.mode === "full_text") {
       if (this.fullTextAvailable) {
         try {
@@ -1135,5 +1164,98 @@ export class SummaryStore {
 
     const result = await this.db.query<LargeFileRow>(sql, [conversationId]);
     return result.rows.map(toLargeFileRecord);
+  }
+
+  // ── Embedding operations ──────────────────────────────────────────────────
+
+  /** Generate an embedding for content and store it on the summary row. */
+  private async generateAndStoreSummaryEmbedding(summaryId: string, content: string): Promise<void> {
+    if (!this.embeddingClient || this.backend !== 'postgres') return;
+    if (!content || content.trim().length < 20) return;
+
+    const embedding = await this.embeddingClient.embedOne(content);
+    await this.db.run(
+      `UPDATE summaries SET embedding = $1 WHERE summary_id = $2`,
+      [toVectorLiteral(embedding), summaryId],
+    );
+  }
+
+  /** Update embedding for a specific summary. Used by backfill scripts. */
+  async updateEmbedding(summaryId: string, embedding: number[]): Promise<void> {
+    if (this.backend !== 'postgres') return;
+    await this.db.run(
+      `UPDATE summaries SET embedding = $1 WHERE summary_id = $2`,
+      [toVectorLiteral(embedding), summaryId],
+    );
+  }
+
+  /** Batch update embeddings for summaries. */
+  async updateEmbeddingsBatch(updates: Array<{ summaryId: string; embedding: number[] }>): Promise<void> {
+    if (this.backend !== 'postgres' || updates.length === 0) return;
+    await this.db.transaction(async (tx) => {
+      for (const { summaryId, embedding } of updates) {
+        await tx.run(
+          `UPDATE summaries SET embedding = $1 WHERE summary_id = $2`,
+          [toVectorLiteral(embedding), summaryId],
+        );
+      }
+    });
+  }
+
+  /** Semantic search over summaries using cosine distance. */
+  async searchSemantic(
+    query: string,
+    limit: number,
+    conversationId?: number,
+    since?: Date,
+    before?: Date,
+  ): Promise<SummarySearchResult[]> {
+    if (this.backend !== 'postgres' || !this.embeddingClient) {
+      return this.searchFullText(query, limit, conversationId, since, before);
+    }
+
+    const queryEmbedding = await this.embeddingClient.embedOne(query);
+    const vectorLiteral = toVectorLiteral(queryEmbedding);
+
+    const where: string[] = ["embedding IS NOT NULL"];
+    const args: Array<string | number> = [];
+    let paramIndex = 1;
+
+    if (conversationId != null) {
+      where.push(`conversation_id = $${paramIndex}`);
+      args.push(conversationId);
+      paramIndex++;
+    }
+    if (since) {
+      where.push(`created_at >= $${paramIndex}`);
+      args.push(since.toISOString());
+      paramIndex++;
+    }
+    if (before) {
+      where.push(`created_at < $${paramIndex}`);
+      args.push(before.toISOString());
+      paramIndex++;
+    }
+
+    const sql = `SELECT
+         summary_id,
+         conversation_id,
+         kind,
+         substring(content for 200) AS snippet,
+         1 - (embedding <=> '${vectorLiteral}'::vector) AS rank,
+         created_at
+       FROM summaries
+       WHERE ${where.join(" AND ")}
+       ORDER BY embedding <=> '${vectorLiteral}'::vector
+       LIMIT $${paramIndex}`;
+
+    args.push(limit);
+    const result = await this.db.query<SummarySearchRow>(sql, args);
+    return result.rows.map(toSearchResult);
+  }
+
+  /** Check whether the embedding client is available */
+  get embeddingsAvailable(): boolean {
+    return this.embeddingClient !== null && this.backend === 'postgres';
   }
 }
